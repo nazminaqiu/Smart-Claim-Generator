@@ -1,0 +1,1297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monthly Claims Generator</title>
+    <!-- Tailwind CSS CDN for modern styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Flatpickr CSS for the date picker UI -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <!-- Lucide Icons CDN for SVG icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- jsPDF for PDF Generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.23/jspdf.plugin.autotable.min.js"></script>
+    <style>
+        /* Ensures the 'Inter' font is used throughout the app for a clean look */
+        body {
+            font-family: "Inter", sans-serif;
+        }
+        /* Custom styling to hide the default up/down arrows on number input fields, for a cleaner UI */
+        input[type='number']::-webkit-inner-spin-button,
+        input[type='number']::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        input[type='number'] {
+            -moz-appearance: textfield; /* Firefox specific */
+        }
+        /* Style for sortable table headers */
+        .sortable-header {
+            cursor: pointer;
+            user-select: none;
+        }
+        .sortable-header:hover {
+            background-color: #f3f4f6; /* Lighter gray on hover */
+        }
+        /* Specific styling for the description textarea within its own row */
+        .description-textarea {
+            width: 100%;
+            min-height: 80px; /* Even taller for dedicated row */
+            max-height: 200px;
+            padding: 0.75rem 1rem;
+            border: 1px solid #e2e8f0; /* gray-200 */
+            border-radius: 0.375rem; /* rounded-md */
+            font-size: 0.875rem; /* text-sm */
+            line-height: 1.25rem;
+            transition: all 150ms ease-in-out;
+        }
+        .description-textarea:focus {
+            outline: none;
+            border-color: #3b82f6; /* blue-500 */
+            box-shadow: 0 0 0 1px #3b82f6; /* ring-1 */
+        }
+    </style>
+</head>
+<body class="bg-gray-100 antialiased p-4">
+    <!-- Main application container, centered and responsive -->
+    <div id="app" class="max-w-full mx-auto bg-gray-50 min-h-screen rounded-xl shadow-2xl p-6 md:p-8 lg:px-12">
+        <!-- Content will be dynamically rendered here by JavaScript -->
+    </div>
+
+    <!-- Flatpickr JS -->
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    
+    <!-- Google Maps API Script - Defer loading and add callback -->
+    <script id="googleMapsScript"></script>
+
+    <!-- JavaScript logic for the application -->
+    <script>
+        // --- State Variables ---
+        let targetAmount = 2340;
+        let startDate = '';
+        let endDate = '';
+        let claims = []; // Stores all generated and custom claims
+        let settings = {
+            mileageRate: 0.5,
+            hpAllowance: 80,
+            dayTripMeal: 40,
+            outstationMeal: 40,
+            tollParking: 200, // This is now treated as the TOTAL for toll claims
+            dailyMileageCap: '', // Default to empty
+            customLocations: [], // New: Array to store user-defined locations
+            googleApiKey: '',
+            startPoint: ''
+        };
+        let showSettings = false;
+        let claimIdCounter = 1;
+        let sortColumn = null;
+        let sortDirection = 'asc';
+        let enabledClaimTypes = ['hp', 'mileage', 'toll'];
+        let includeSaturday = false;
+        let includeSunday = false;
+        let expandedClaims = new Set();
+        let mapsApiLoaded = false;
+        let isApiKeyLocked = true; // New state variable for API key lock status
+        let distanceMultiplier = 1.0; // New: Distance multiplier for generation, now a float
+
+        // --- Site Type Definitions (Revised for IT Technical Specialist) ---
+        const siteTypes = [
+            { id: 'client_premise', name: 'Client Premise' },
+            { id: 'data_center', name: 'Data Center' },
+            { id: 'branch_office', name: 'Branch Office' },
+            { id: 'vendor_partner', name: 'Vendor/Partner' },
+            { id: 'internal_lab', name: 'Internal Lab' },
+            { id: 'training_conference', name: 'Training/Conference' },
+            { id: 'remote_work_hub', name: 'Remote Work Hub' },
+            { id: 'other_technical', name: 'Other Technical' }
+        ];
+
+        // Generic activity descriptions for unique mileage descriptions, now categorized by site type
+        const activityDescriptions = {
+            client_premise: ['On-site System Deployment for', 'Client Network Troubleshooting at', 'Hardware Repair at Client', 'Software Configuration for Client at', 'Technical Consultation at'],
+            data_center: ['Server Maintenance at', 'Network Infrastructure Upgrade at', 'Hardware Installation at', 'System Monitoring & Audit at', 'Troubleshooting Rack Issues at'],
+            branch_office: ['Branch Network Support at', 'IT System Audit at Branch', 'User Support & Training at Branch', 'Printer/Peripheral Setup at Branch'],
+            vendor_partner: ['Technical Review with Vendor', 'Product Evaluation Meeting at', 'Partnership Discussion at', 'New Technology Briefing with'],
+            internal_lab: ['R&D Experimentation at Lab', 'Software Testing at Lab', 'Hardware Prototyping at Lab', 'System Integration Testing at'],
+            training_conference: ['Attended Technical Training:', 'IT Conference at', 'Workshop Participation at', 'Certification Exam at'],
+            remote_work_hub: ['Collaborative Session at Remote Hub', 'Focused Development at Remote Hub', 'Project Sprint at Remote Hub'],
+            other_technical: ['Ad-hoc Technical Visit to', 'Emergency Support at', 'Field Investigation at', 'Technical Reconnaissance at'],
+            default: ['Technical Visit to', 'Support Activity at', 'System Check at', 'IT Task at']
+        };
+
+        // --- Local Storage Functions ---
+        function saveToLocalStorage() {
+            try {
+                localStorage.setItem('claimsGenerator_claims', JSON.stringify(claims));
+                localStorage.setItem('claimsGenerator_settings', JSON.stringify(settings));
+                localStorage.setItem('claimsGenerator_targetAmount', targetAmount.toString());
+                localStorage.setItem('claimsGenerator_startDate', startDate);
+                localStorage.setItem('claimsGenerator_endDate', endDate);
+                localStorage.setItem('claimsGenerator_sortColumn', sortColumn || '');
+                localStorage.setItem('claimsGenerator_sortDirection', sortDirection);
+                localStorage.setItem('claimsGenerator_enabledClaimTypes', JSON.stringify(enabledClaimTypes));
+                localStorage.setItem('claimsGenerator_includeSaturday', includeSaturday.toString());
+                localStorage.setItem('claimsGenerator_includeSunday', includeSunday.toString());
+                localStorage.setItem('claimsGenerator_expandedClaims', JSON.stringify(Array.from(expandedClaims)));
+                localStorage.setItem('claimsGenerator_isApiKeyLocked', isApiKeyLocked.toString()); // Save lock status
+                localStorage.setItem('claimsGenerator_distanceMultiplier', distanceMultiplier.toString()); // Save multiplier
+            } catch (error) {
+                console.error('Error saving to local storage:', error);
+                showMessageBox('Save Error', 'Could not save data to local storage.');
+            }
+        }
+
+        function loadFromLocalStorage() {
+            try {
+                const storedClaims = localStorage.getItem('claimsGenerator_claims');
+                if (storedClaims) {
+                    claims = JSON.parse(storedClaims);
+                    // One-time migration for old data to add baseDistance property
+                    claims.forEach(claim => {
+                        if (claim.type === 'mileage' && claim.baseDistance === undefined) {
+                            // If a claim doesn't have a base distance, assume its current distance is the base
+                            claim.baseDistance = claim.distance;
+                        }
+                    });
+                    claimIdCounter = claims.reduce((maxId, claim) => Math.max(maxId, claim.id), 0) + 1;
+                }
+
+                const storedSettings = localStorage.getItem('claimsGenerator_settings');
+                if (storedSettings) {
+                    const loadedSettings = JSON.parse(storedSettings);
+                    settings = { ...settings, ...loadedSettings };
+                    if (!Array.isArray(settings.customLocations)) settings.customLocations = [];
+                    // Ensure each custom location has a displayName, even if loaded from old format
+                    settings.customLocations = settings.customLocations.map(loc => ({
+                        ...loc,
+                        // If displayName doesn't exist, use the 'name' (full address) as fallback
+                        displayName: loc.displayName || loc.name, 
+                        type: siteTypes.some(st => st.id === loc.type) ? loc.type : 'other_technical',
+                        frequency: loc.frequency || 'multiple',
+                        priority: loc.priority || 'normal'
+                    }));
+                }
+
+                const storedTargetAmount = localStorage.getItem('claimsGenerator_targetAmount');
+                if (storedTargetAmount) targetAmount = parseFloat(storedTargetAmount);
+
+                const storedStartDate = localStorage.getItem('claimsGenerator_startDate');
+                const storedEndDate = localStorage.getItem('claimsGenerator_endDate');
+                if (storedStartDate && storedEndDate) {
+                    startDate = storedStartDate;
+                    endDate = storedEndDate;
+                } else {
+                    const today = new Date();
+                    const year = today.getFullYear();
+                    const month = today.getMonth();
+                    startDate = new Date(year, month, 1).toISOString().split('T')[0];
+                    endDate = new Date(year, month + 1, 0).toISOString().split('T')[0];
+                }
+
+                const storedSortColumn = localStorage.getItem('claimsGenerator_sortColumn');
+                if (storedSortColumn) sortColumn = storedSortColumn === '' ? null : storedSortColumn;
+
+                const storedSortDirection = localStorage.getItem('claimsGenerator_sortDirection');
+                if (storedSortDirection) sortDirection = storedSortDirection;
+
+                const storedEnabledClaimTypes = localStorage.getItem('claimsGenerator_enabledClaimTypes');
+                if (storedEnabledClaimTypes) enabledClaimTypes = JSON.parse(storedEnabledClaimTypes);
+
+                const storedIncludeSaturday = localStorage.getItem('claimsGenerator_includeSaturday');
+                if (storedIncludeSaturday !== null) includeSaturday = storedIncludeSaturday === 'true';
+                
+                const storedIncludeSunday = localStorage.getItem('claimsGenerator_includeSunday');
+                if (storedIncludeSunday !== null) includeSunday = storedIncludeSunday === 'true';
+
+                const storedExpandedClaims = localStorage.getItem('claimsGenerator_expandedClaims');
+                if (storedExpandedClaims) expandedClaims = new Set(JSON.parse(storedExpandedClaims));
+
+                const storedApiKeyLocked = localStorage.getItem('claimsGenerator_isApiKeyLocked');
+                if (storedApiKeyLocked !== null) isApiKeyLocked = storedApiKeyLocked === 'true';
+
+                const storedDistanceMultiplier = localStorage.getItem('claimsGenerator_distanceMultiplier');
+                if (storedDistanceMultiplier !== null) distanceMultiplier = parseFloat(storedDistanceMultiplier);
+
+            } catch (error) {
+                console.error('Error loading from local storage:', error);
+                showMessageBox('Load Error', 'Could not load saved data. Starting with defaults.');
+            }
+        }
+
+        // --- Helper Functions ---
+        const getClaimTypeDefinitions = (currentSettings) => [
+            { id: 'hp', name: 'HP Allowance', icon: 'phone', fixed: true, amount: currentSettings.hpAllowance },
+            { id: 'mileage', name: 'Mileage', icon: 'car', fixed: false, amount: 0 },
+            { id: 'toll', name: 'Toll/Parking', icon: 'map-pin', fixed: true, amount: currentSettings.tollParking },
+            { id: 'meal_day', name: 'Meal Allowance (Day Trip)', icon: 'utensils', fixed: true, amount: currentSettings.dayTripMeal },
+            { id: 'meal_outstation', name: 'Meal Allowance (Outstation)', icon: 'utensils', fixed: true, amount: currentSettings.outstationMeal }
+        ];
+
+        function getClaimIconName(type) {
+            const claimType = getClaimTypeDefinitions(settings).find(ct => ct.id === type);
+            return claimType ? claimType.icon : 'alert-circle';
+        }
+
+        function showMessageBox(title, message, onConfirm = null) {
+            let messageBox = document.getElementById('messageBox');
+            if (messageBox) messageBox.remove();
+            
+            messageBox = document.createElement('div');
+            messageBox.id = 'messageBox';
+            messageBox.className = 'fixed inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-center z-50 p-4';
+            
+            const confirmButtonHtml = onConfirm ? `<button id="confirmMessageBox" class="w-full sm:w-auto px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Yes, Delete</button>` : '';
+
+            messageBox.innerHTML = `
+                <div class="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full">
+                    <h3 class="text-xl font-bold mb-4 text-gray-900">${title}</h3>
+                    <p class="text-gray-700 mb-6">${message}</p>
+                    <div class="flex flex-col sm:flex-row sm:justify-end sm:space-x-3 space-y-2 sm:space-y-0">
+                        <button id="closeMessageBox" class="w-full sm:w-auto px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300">${onConfirm ? 'Cancel' : 'Close'}</button>
+                        ${confirmButtonHtml}
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(messageBox);
+            
+            document.getElementById('closeMessageBox').onclick = () => messageBox.remove();
+            if (onConfirm) {
+                document.getElementById('confirmMessageBox').onclick = () => {
+                    onConfirm();
+                    messageBox.remove();
+                };
+            }
+        }
+
+        function sortClaims() {
+            if (!sortColumn) return;
+            claims.sort((a, b) => {
+                let valA = a[sortColumn];
+                let valB = b[sortColumn];
+                if (valA === null || valA === undefined) return sortDirection === 'asc' ? -1 : 1;
+                if (valB === null || valB === undefined) return sortDirection === 'asc' ? 1 : -1;
+                let comparison = 0;
+                if (sortColumn === 'amount') {
+                    const totalA = a.amount + (a.type === 'mileage' && a.includesMealAllowance ? a.mealAllowanceAmount : 0);
+                    const totalB = b.amount + (b.type === 'mileage' && b.includesMealAllowance ? b.mealAllowanceAmount : 0);
+                    comparison = totalA - totalB;
+                } else if (sortColumn === 'date') {
+                    comparison = new Date(valA).getTime() - new Date(valB).getTime();
+                } else if (typeof valA === 'string') {
+                    comparison = valA.localeCompare(valB);
+                } else {
+                    comparison = valA - valB;
+                }
+                return sortDirection === 'asc' ? comparison : -comparison;
+            });
+            saveToLocalStorage();
+        }
+
+        function sortCustomLocations() {
+            const priorityOrder = { 'high': 1, 'normal': 2, 'low': 3, 'exclude': 4 };
+            // Changed comparison to sort High priority (1) to the top (ascending order)
+            settings.customLocations.sort((a, b) => (priorityOrder[a.priority] || 99) - (priorityOrder[b.priority] || 99));
+        }
+
+        // --- Core Application Logic ---
+        function applyDistanceMultiplier() {
+            claims = claims.map(claim => {
+                // Only apply to mileage claims that have a valid baseDistance (i.e., not manually edited)
+                if (claim.type === 'mileage' && typeof claim.baseDistance === 'number') {
+                    const newDistance = Math.round(claim.baseDistance * distanceMultiplier);
+                    
+                    claim.distance = newDistance;
+                    claim.amount = newDistance * settings.mileageRate;
+                    const isOutstation = newDistance > 200;
+                    const qualifiesForMeal = newDistance > 40;
+                    
+                    if (qualifiesForMeal) {
+                        claim.mealAllowanceAmount = isOutstation ? settings.outstationMeal : settings.dayTripMeal;
+                        claim.mealAllowanceType = isOutstation ? 'meal_outstation' : 'meal_day';
+                    } else {
+                        // If it no longer qualifies, ensure meal allowance is off
+                        claim.includesMealAllowance = false; 
+                        claim.mealAllowanceAmount = 0;
+                        claim.mealAllowanceType = null;
+                    }
+                }
+                return claim;
+            });
+
+            saveToLocalStorage();
+            renderApp();
+        }
+
+        function generateClaims() {
+            if (!startDate || !endDate) {
+                showMessageBox('Error', 'Please select a valid date range.');
+                return;
+            }
+
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            let newClaims = [];
+            let currentTotal = 0;
+            claimIdCounter = 1;
+
+            const activeLocations = settings.customLocations.filter(loc => loc.priority !== 'exclude');
+            if (activeLocations.length === 0 && enabledClaimTypes.includes('mileage')) {
+                 showMessageBox('Warning', 'No custom sites defined. Add some in settings to generate mileage claims.');
+            }
+            
+            const diffDays = Math.ceil(Math.abs(end - start) / (1000 * 60 * 60 * 24)) + 1;
+
+            const getAvailableDays = () => {
+                const allDays = [];
+                for (let d = 0; d < diffDays; d++) {
+                    const currentDate = new Date(start);
+                    currentDate.setDate(start.getDate() + d);
+                    const dayOfWeek = currentDate.getDay();
+                    if (!((dayOfWeek === 0 && !includeSunday) || (dayOfWeek === 6 && !includeSaturday))) {
+                        allDays.push(currentDate.toISOString().split('T')[0]);
+                    }
+                }
+                const usedDays = new Set(newClaims.filter(c => c.type === 'mileage').map(c => c.date));
+                return allDays.filter(d => !usedDays.has(d));
+            };
+
+            const createWeightedPool = (locations) => {
+                const pool = [];
+                locations.forEach(loc => {
+                    const weight = { high: 5, normal: 3, low: 1 }[loc.priority] || 3;
+                    for (let i = 0; i < weight; i++) pool.push(loc);
+                });
+                return pool;
+            };
+
+            if (enabledClaimTypes.includes('hp')) {
+                newClaims.push({ id: claimIdCounter++, type: 'hp', description: 'HP ALLOWANCE', date: startDate, amount: settings.hpAllowance, distance: null, location: null, includesMealAllowance: false, mealAllowanceAmount: 0, mealAllowanceType: null });
+                currentTotal += settings.hpAllowance;
+            }
+
+            if (enabledClaimTypes.includes('toll') && settings.tollParking > 0) {
+                let remainingToll = settings.tollParking;
+                let numTollEntries = Math.floor(Math.random() * 4) + 2;
+                for (let i = 0; i < numTollEntries && remainingToll > 0; i++) {
+                    let amount = (i === numTollEntries - 1) ? remainingToll : Math.max(5, Math.round((Math.random() * remainingToll * 0.6) / 5) * 5);
+                    amount = Math.min(amount, remainingToll);
+                    const randomDate = new Date(start.getTime() + Math.random() * (end.getTime() - start.getTime()));
+                    newClaims.push({ id: claimIdCounter++, type: 'toll', description: `Toll & Parking (Part ${i + 1})`, date: randomDate.toISOString().split('T')[0], amount, distance: null, location: null, includesMealAllowance: false, mealAllowanceAmount: 0, mealAllowanceType: null });
+                    currentTotal += amount;
+                    remainingToll -= amount;
+                }
+            }
+            
+            const processLocation = (location, claimDate) => {
+                const baseDist = location.distance;
+                let actualDistance = Math.round(baseDist * distanceMultiplier);
+
+                if (settings.dailyMileageCap && actualDistance > settings.dailyMileageCap) actualDistance = settings.dailyMileageCap;
+                const isOutstation = actualDistance > 200;
+                let mileageAmount = actualDistance * settings.mileageRate;
+                let mealAmount = 0, mealType = null;
+                if (actualDistance > 40) {
+                    mealAmount = isOutstation ? settings.outstationMeal : settings.dayTripMeal;
+                    mealType = isOutstation ? 'meal_outstation' : 'meal_day';
+                }
+                const activities = activityDescriptions[location.type] || activityDescriptions.default;
+                const locationDisplayName = location.displayName || location.name;
+                const description = `${activities[Math.floor(Math.random() * activities.length)]} ${locationDisplayName}`;
+                
+                newClaims.push({ 
+                    id: claimIdCounter++, 
+                    type: 'mileage', 
+                    description, 
+                    date: claimDate, 
+                    amount: mileageAmount, 
+                    baseDistance: baseDist, // Store the original, unmultiplied distance
+                    distance: actualDistance, // Store the calculated, multiplied distance
+                    location: location.name,
+                    locationDisplayName: locationDisplayName,
+                    locationType: location.type, 
+                    includesMealAllowance: false, 
+                    mealAllowanceAmount: mealAmount, 
+                    mealAllowanceType: mealType, 
+                    isFiller: false 
+                });
+                currentTotal += mileageAmount;
+            };
+
+            if (enabledClaimTypes.includes('mileage')) {
+                const singleEntryLocations = activeLocations.filter(loc => loc.frequency === 'single' && loc.distance > 0);
+                singleEntryLocations.forEach(location => {
+                    const availableDays = getAvailableDays();
+                    if (availableDays.length > 0) {
+                        const claimDate = availableDays[Math.floor(Math.random() * availableDays.length)];
+                        processLocation(location, claimDate);
+                    }
+                });
+
+                const multipleEntryLocations = activeLocations.filter(loc => loc.frequency !== 'single' && loc.distance > 0);
+                const multipleEntryPool = createWeightedPool(multipleEntryLocations);
+                if (multipleEntryPool.length > 0) {
+                    let availableDays = getAvailableDays();
+                    availableDays.forEach(claimDate => {
+                        const location = multipleEntryPool[Math.floor(Math.random() * multipleEntryPool.length)];
+                        processLocation(location, claimDate);
+                    });
+                }
+            }
+            
+            claims = newClaims;
+            sortColumn = 'date';
+            sortDirection = 'asc';
+            sortClaims();
+            renderApp();
+            saveToLocalStorage();
+        }
+
+        function addCustomClaim() {
+            const newClaim = { 
+                id: claimIdCounter++, 
+                type: 'mileage', 
+                description: 'Custom Claim', 
+                date: startDate || new Date().toISOString().split('T')[0], 
+                amount: 0, 
+                distance: 0, 
+                baseDistance: null, // Custom claims are not affected by multiplier by default
+                location: '', 
+                locationDisplayName: '', 
+                locationType: 'other_technical', 
+                includesMealAllowance: false, 
+                mealAllowanceAmount: 0, 
+                mealAllowanceType: null 
+            };
+            claims.push(newClaim);
+            renderApp();
+            saveToLocalStorage();
+        }
+
+        function updateClaim(id, field, value) {
+            claims = claims.map(claim => {
+                if (claim.id === id) {
+                    const updated = { ...claim, [field]: value };
+                    if (updated.type === 'mileage') {
+                        if (field === 'distance') {
+                            updated.amount = value * settings.mileageRate;
+                            // When distance is manually edited, de-link it from the global multiplier
+                            updated.baseDistance = null; 
+                            const isOutstation = value > 200;
+                            const qualifiesForMeal = value > 40;
+                            if (qualifiesForMeal) {
+                                updated.mealAllowanceAmount = isOutstation ? settings.outstationMeal : settings.dayTripMeal;
+                                updated.mealAllowanceType = isOutstation ? 'meal_outstation' : 'meal_day';
+                            } else {
+                                updated.includesMealAllowance = false;
+                                updated.mealAllowanceAmount = 0;
+                                updated.mealAllowanceType = null;
+                            }
+                        } else if (field === 'includesMealAllowance') {
+                            if (value && updated.distance > 40) {
+                                const isOutstation = updated.distance > 200;
+                                updated.mealAllowanceAmount = isOutstation ? settings.outstationMeal : settings.dayTripMeal;
+                                updated.mealAllowanceType = isOutstation ? 'meal_outstation' : 'meal_day';
+                            } else {
+                                if (value) showMessageBox('Note', 'Meal allowance is for mileage claims over 40km.');
+                                updated.includesMealAllowance = false;
+                                updated.mealAllowanceAmount = 0;
+                                updated.mealAllowanceType = null;
+                            }
+                        }
+                    }
+                    return updated;
+                }
+                return claim;
+            });
+            renderApp();
+            saveToLocalStorage();
+        }
+
+        function updateAllClaimsByLocation(locationName, newDistance) {
+            if (newDistance < 0) return;
+            const cap = settings.dailyMileageCap || Infinity;
+            if (newDistance > cap) {
+                showMessageBox('Cap Reached', `The daily mileage cap is set to ${cap} km.`);
+                newDistance = cap;
+            }
+
+            claims.forEach(claim => {
+                if (claim.location === locationName) {
+                    claim.distance = newDistance;
+                    // De-link from multiplier when batch-adjusting
+                    claim.baseDistance = null; 
+                    claim.amount = newDistance * settings.mileageRate;
+                    const isOutstation = newDistance > 200;
+                    const qualifiesForMeal = newDistance > 40;
+                    if (qualifiesForMeal) {
+                        claim.mealAllowanceAmount = isOutstation ? settings.outstationMeal : settings.dayTripMeal;
+                        claim.mealAllowanceType = isOutstation ? 'meal_outstation' : 'meal_day';
+                    } else {
+                        claim.includesMealAllowance = false;
+                        claim.mealAllowanceAmount = 0;
+                        claim.mealAllowanceType = null;
+                    }
+                }
+            });
+            renderApp();
+            saveToLocalStorage();
+        }
+        
+        function silentUpdateAllClaimsByLocation(locationName, newDistance) {
+            let changed = false;
+            const cap = settings.dailyMileageCap || Infinity;
+            if (newDistance > cap) {
+                newDistance = cap;
+            }
+
+            claims.forEach(claim => {
+                if (claim.location === locationName && claim.distance < newDistance) {
+                    claim.distance = newDistance;
+                    claim.baseDistance = null; // De-link from multiplier
+                    claim.amount = newDistance * settings.mileageRate;
+                    const isOutstation = newDistance > 200;
+                    const qualifiesForMeal = newDistance > 40;
+                    if (qualifiesForMeal) {
+                        claim.mealAllowanceAmount = isOutstation ? settings.outstationMeal : settings.dayTripMeal;
+                        claim.mealAllowanceType = isOutstation ? 'meal_outstation' : 'meal_day';
+                    } else {
+                        claim.includesMealAllowance = false;
+                        claim.mealAllowanceAmount = 0;
+                        claim.mealAllowanceType = null;
+                    }
+                    changed = true;
+                }
+            });
+            return changed;
+        }
+
+
+        function deleteClaim(id) {
+            claims = claims.filter(claim => claim.id !== id);
+            expandedClaims.delete(id);
+            renderApp();
+            saveToLocalStorage();
+        }
+
+        function deleteAllClaims() {
+            if (claims.length === 0) {
+                showMessageBox('Info', 'There are no claims to delete.');
+                return;
+            }
+            showMessageBox('Confirm Deletion', 'Are you sure you want to delete all claims?', () => {
+                claims = [];
+                expandedClaims.clear();
+                renderApp();
+                saveToLocalStorage();
+            });
+        }
+
+        function exportBackup() {
+            const backupData = {
+                claims,
+                settings,
+                targetAmount,
+                startDate,
+                endDate,
+                sortColumn,
+                sortDirection,
+                enabledClaimTypes,
+                includeSaturday,
+                includeSunday,
+                expandedClaims: Array.from(expandedClaims),
+                isApiKeyLocked, // Include lock status in backup
+                distanceMultiplier // Include multiplier in backup
+            };
+            const jsonString = JSON.stringify(backupData, null, 2);
+            const blob = new Blob([jsonString], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const date = new Date().toISOString().split('T')[0];
+            a.href = url;
+            a.download = `claims_backup_${date}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function importBackup() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json';
+            input.onchange = e => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = event => {
+                    try {
+                        const backupData = JSON.parse(event.target.result);
+                        // Basic validation
+                        if (backupData && backupData.claims && backupData.settings) {
+                            claims = backupData.claims || [];
+                            settings = backupData.settings || settings;
+                            targetAmount = backupData.targetAmount || targetAmount;
+                            startDate = backupData.startDate || '';
+                            endDate = backupData.endDate || '';
+                            sortColumn = backupData.sortColumn || null;
+                            sortDirection = backupData.sortDirection || 'asc';
+                            enabledClaimTypes = backupData.enabledClaimTypes || [];
+                            includeSaturday = backupData.includeSaturday || false;
+                            includeSunday = backupData.includeSunday || false;
+                            expandedClaims = new Set(backupData.expandedClaims || []);
+                            isApiKeyLocked = backupData.isApiKeyLocked !== undefined ? backupData.isApiKeyLocked : true; // Restore lock status
+                            distanceMultiplier = parseFloat(backupData.distanceMultiplier) || 1.0; // Restore multiplier
+
+                            // Ensure imported custom locations also have displayName
+                            settings.customLocations = settings.customLocations.map(loc => ({
+                                ...loc,
+                                displayName: loc.displayName || loc.name
+                            }));
+
+                            saveToLocalStorage();
+                            renderApp();
+                            showMessageBox('Success', 'Backup restored successfully.');
+                        } else {
+                            showMessageBox('Error', 'Invalid backup file format.');
+                        }
+                    } catch (error) {
+                        showMessageBox('Error', 'Could not read or parse the backup file.');
+                        console.error("Import error:", error);
+                    }
+                };
+                reader.readAsText(file);
+            };
+            input.click();
+        }
+        
+        function exportToPDF() {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            
+            const totalAmount = claims.reduce((sum, claim) => sum + claim.amount + (claim.includesMealAllowance ? claim.mealAllowanceAmount : 0), 0);
+
+            doc.setFontSize(20);
+            doc.text("Monthly Claims Report", 14, 22);
+            doc.setFontSize(11);
+            doc.setTextColor(100);
+
+            doc.text(`Date Range: ${startDate} to ${endDate}`, 14, 32);
+            doc.text(`Target Amount: MYR ${targetAmount.toFixed(2)}`, 14, 38);
+            doc.text(`Final Total Amount: MYR ${totalAmount.toFixed(2)}`, 14, 44);
+
+            const tableColumn = ["Date", "Type", "Description", "Distance (km)", "Meal (MYR)", "Amount (MYR)"];
+            const tableRows = [];
+
+            const sortedClaims = [...claims].sort((a, b) => new Date(a.date) - new Date(b.date));
+
+            sortedClaims.forEach(claim => {
+                const claimData = [
+                    claim.date,
+                    claim.type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()),
+                    claim.description,
+                    claim.type === 'mileage' ? claim.distance.toFixed(0) : '-',
+                    claim.includesMealAllowance ? claim.mealAllowanceAmount.toFixed(2) : '0.00',
+                    (claim.amount + (claim.includesMealAllowance ? claim.mealAllowanceAmount : 0)).toFixed(2)
+                ];
+                tableRows.push(claimData);
+            });
+
+            doc.autoTable({
+                head: [tableColumn],
+                body: tableRows,
+                startY: 50,
+                theme: 'striped',
+                headStyles: { fillColor: [22, 160, 133] },
+                didDrawPage: function (data) {
+                    // Footer
+                    let str = "Page " + doc.internal.getNumberOfPages();
+                    doc.setFontSize(10);
+                    doc.text(str, data.settings.margin.left, doc.internal.pageSize.height - 10);
+                }
+            });
+            
+            // Add a total row
+            const finalY = doc.lastAutoTable.finalY;
+            doc.setFontSize(12);
+            doc.setFont('helvetica', 'bold');
+            doc.text("Grand Total:", 14, finalY + 10);
+            doc.text(`MYR ${totalAmount.toFixed(2)}`, 160, finalY + 10, { align: 'right' });
+
+
+            const date = new Date().toISOString().split('T')[0];
+            doc.save(`claims-report-${date}.pdf`);
+        }
+
+
+        // --- UI Rendering and Event Handling ---
+        function renderApp() {
+            const appDiv = document.getElementById('app');
+            const scrollY = window.scrollY;
+
+            const totalAmount = claims.reduce((sum, claim) => sum + claim.amount + (claim.includesMealAllowance ? claim.mealAllowanceAmount : 0), 0);
+            const progress = targetAmount > 0 ? Math.min(100, (totalAmount / targetAmount) * 100) : 0;
+            let dateRangeDisplay = (startDate && endDate) ? `${startDate} to ${endDate}` : "Select Date Range";
+
+            const allDescriptionsExpanded = claims.length > 0 && claims.every(claim => expandedClaims.has(claim.id));
+            const expandCollapseText = allDescriptionsExpanded ? 'Collapse All' : 'Expand All';
+            const expandCollapseIcon = allDescriptionsExpanded ? 'chevron-up' : 'chevron-down';
+            
+            const uniqueSitesInTable = [...new Set(claims.filter(c => c.type === 'mileage' && c.locationDisplayName).map(c => c.locationDisplayName))];
+
+            appDiv.innerHTML = `
+                <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
+                    <div class="flex items-center justify-between mb-6 flex-wrap gap-4">
+                        <h1 class="text-3xl font-extrabold text-gray-800 flex items-center">
+                            <i data-lucide="calendar" class="mr-3 text-blue-600 w-8 h-8"></i>
+                            Monthly Claims Generator
+                        </h1>
+                        <button id="toggleSettings" class="flex items-center px-5 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 shadow-md">
+                            <i data-lucide="settings" class="w-5 h-5 mr-2"></i>Settings
+                        </button>
+                    </div>
+
+                    ${showSettings ? `
+                        <div class="bg-blue-50 p-6 rounded-lg mb-6 shadow-inner border border-blue-200">
+                            <h3 class="text-xl font-semibold mb-5 text-blue-800">API & Distance Calculation</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                                <div class="flex items-end space-x-2">
+                                    <div class="flex-grow">
+                                        <label for="googleApiKey" class="block text-sm font-medium text-blue-700 mb-2">Google Maps API Key</label>
+                                        <input type="password" id="googleApiKey" value="${settings.googleApiKey}" class="w-full px-4 py-2 border border-blue-300 rounded-lg ${isApiKeyLocked ? 'bg-gray-100' : 'bg-white'}" placeholder="Enter your API key" ${isApiKeyLocked ? 'readonly' : ''}/>
+                                        <p class="text-xs text-gray-500 mt-1">Needed for auto distance calculation. Get one from Google Cloud Platform.</p>
+                                    </div>
+                                    <button id="toggleApiKeyLock" class="px-3 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 text-sm flex-shrink-0">
+                                        <i data-lucide="${isApiKeyLocked ? 'lock' : 'unlock'}" class="w-4 h-4"></i>
+                                    </button>
+                                </div>
+                                <div>
+                                    <label for="startPoint" class="block text-sm font-medium text-blue-700 mb-2">Default Start Point Address</label>
+                                    <input type="text" id="startPoint" value="${settings.startPoint}" class="w-full px-4 py-2 border border-blue-300 rounded-lg bg-white" placeholder="e.g. Your Home or Office Address"/>
+                                </div>
+                            </div>
+
+                            <h3 class="text-xl font-semibold mb-5 text-blue-800">Claim Settings</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                <div><label for="mileageRate" class="block text-sm font-medium text-blue-700 mb-2">Mileage Rate (MYR/km)</label><input type="number" step="0.01" id="mileageRate" value="${settings.mileageRate}" class="w-full px-4 py-2 border border-blue-300 rounded-lg bg-white"/></div>
+                                <div><label for="hpAllowance" class="block text-sm font-medium text-blue-700 mb-2">HP Allowance (MYR)</label><input type="number" id="hpAllowance" value="${settings.hpAllowance}" class="w-full px-4 py-2 border border-blue-300 rounded-lg bg-white"/></div>
+                                <div><label for="dayTripMeal" class="block text-sm font-medium text-blue-700 mb-2">Day Trip Meal (MYR)</label><input type="number" id="dayTripMeal" value="${settings.dayTripMeal}" class="w-full px-4 py-2 border border-blue-300 rounded-lg bg-white"/></div>
+                                <div><label for="outstationMeal" class="block text-sm font-medium text-blue-700 mb-2">Outstation Meal (MYR)</label><input type="number" id="outstationMeal" value="${settings.outstationMeal}" class="w-full px-4 py-2 border border-blue-300 rounded-lg bg-white"/></div>
+                                <div><label for="tollParking" class="block text-sm font-medium text-blue-700 mb-2">Toll/Parking Total (MYR)</label><input type="number" id="tollParking" value="${settings.tollParking}" class="w-full px-4 py-2 border border-blue-300 rounded-lg bg-white"/></div>
+                                <div><label for="dailyMileageCap" class="block text-sm font-medium text-blue-700 mb-2">Daily Mileage Cap (km)</label><input type="number" id="dailyMileageCap" value="${settings.dailyMileageCap}" placeholder="No limit" class="w-full px-4 py-2 border border-blue-300 rounded-lg bg-white"/></div>
+                            </div>
+                            <h3 class="text-xl font-semibold mb-3 mt-8 text-blue-800">Enabled Claim Types</h3>
+                            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                                ${getClaimTypeDefinitions({}).filter(ct => !ct.id.startsWith('meal')).map(claimType => `
+                                    <div class="flex items-center"><input type="checkbox" id="enable-${claimType.id}" value="${claimType.id}" ${enabledClaimTypes.includes(claimType.id) ? 'checked' : ''} class="claim-type-checkbox h-4 w-4 text-blue-600"/><label for="enable-${claimType.id}" class="ml-2 text-sm">${claimType.name}</label></div>`).join('')}
+                            </div>
+                            <h3 class="text-xl font-semibold mb-3 mt-8 text-blue-800">Include Weekends</h3>
+                            <div class="flex gap-6">
+                                <div class="flex items-center"><input type="checkbox" id="includeSaturday" ${includeSaturday ? 'checked' : ''} class="h-4 w-4 text-blue-600"/><label for="includeSaturday" class="ml-2 text-sm">Saturday</label></div>
+                                <div class="flex items-center"><input type="checkbox" id="includeSunday" ${includeSunday ? 'checked' : ''} class="h-4 w-4 text-blue-600"/><label for="includeSunday" class="ml-2 text-sm">Sunday</label></div>
+                            </div>
+                            <h3 class="text-xl font-semibold mb-3 mt-8 text-blue-800">Manage Site Locations</h3>
+                            <div class="flex flex-col gap-3 mb-4">
+                                <div class="flex flex-col lg:flex-row gap-2 items-center">
+                                    <input type="text" id="newLocationDisplayName" placeholder="New Site Name (e.g., HQ Office)" class="flex-grow lg:w-1/5 px-3 py-2 border rounded-lg"/>
+                                    <input type="text" id="newLocationName" placeholder="New Site Address (e.g., 123 Main St)" class="flex-grow lg:w-2/5 px-3 py-2 border rounded-lg"/>
+                                    <input type="number" id="newLocationDistance" placeholder="Distance (km)" class="w-24 px-3 py-2 border rounded-lg"/>
+                                    <button id="calculateNewDistance" class="px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-sm flex-shrink-0">Calculate</button>
+                                    <select id="newLocationType" class="lg:w-40 px-3 py-2 border rounded-lg flex-shrink-0">${siteTypes.map(type => `<option value="${type.id}">${type.name}</option>`).join('')}</select>
+                                    <select id="newLocationFrequency" class="lg:w-40 px-3 py-2 border rounded-lg flex-shrink-0"><option value="multiple">Multiple Entries</option><option value="single">Single Entry</option></select>
+                                    <select id="newLocationPriority" class="lg:w-32 px-3 py-2 border rounded-lg flex-shrink-0"><option value="high">High</option><option value="normal" selected>Normal</option><option value="low">Low</option><option value="exclude">Exclude</option></select>
+                                    <button id="addLocation" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center justify-center flex-shrink-0"><i data-lucide="plus" class="w-4 h-4 mr-2"></i>Add</button>
+                                </div>
+                                <ul class="space-y-2">${settings.customLocations.length > 0 ? settings.customLocations.map((loc, index) => `
+                                    <li class="flex items-center justify-between bg-white p-3 rounded-lg shadow-sm flex-wrap gap-2">
+                                        <input type="text" value="${loc.displayName}" data-location-index="${index}" data-field="displayName" class="location-input flex-grow lg:w-1/5 px-2 py-1 border rounded text-sm"/>
+                                        <input type="text" value="${loc.name}" data-location-index="${index}" data-field="name" class="location-input flex-grow lg:w-2/5 px-2 py-1 border rounded text-sm" placeholder="Full Address"/>
+                                        <input type="number" value="${loc.distance || ''}" data-location-index="${index}" data-field="distance" class="location-input w-20 px-2 py-1 border rounded text-sm" placeholder="0"/>
+                                        <span class="text-sm text-gray-600">km</span>
+                                        <button data-location-index="${index}" class="calculate-existing-btn px-2 py-1 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-xs flex-shrink-0">Calc</button>
+                                        <select data-location-index="${index}" data-field="type" class="location-input px-2 py-1 border rounded text-sm flex-shrink-0">${siteTypes.map(type => `<option value="${type.id}" ${loc.type === type.id ? 'selected' : ''}>${type.name}</option>`).join('')}</select>
+                                        <select data-location-index="${index}" data-field="frequency" class="location-input px-2 py-1 border rounded text-sm flex-shrink-0"><option value="multiple" ${loc.frequency === 'multiple' ? 'selected' : ''}>Multiple</option><option value="single" ${loc.frequency === 'single' ? 'selected' : ''}>Single</option></select>
+                                        <select data-location-index="${index}" data-field="priority" class="location-input px-2 py-1 border rounded text-sm flex-shrink-0"><option value="high" ${loc.priority === 'high' ? 'selected' : ''}>High</option><option value="normal" ${loc.priority === 'normal' ? 'selected' : ''}>Normal</option><option value="low" ${loc.priority === 'low' ? 'selected' : ''}>Low</option><option value="exclude" ${loc.priority === 'exclude' ? 'selected' : ''}>Exclude</option></select>
+                                        <button data-location-index="${index}" class="delete-location-btn text-red-600 hover:text-red-800 ml-3 flex-shrink-0"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                                    </li>`).join('') : '<li class="text-gray-500 text-sm">No custom locations added.</li>'}
+                                </ul>
+                            </div>
+                        </div>` : ''}
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                        <div><label for="dateRangePicker" class="block text-sm font-medium text-gray-700 mb-2">Target Date Range</label><input type="text" id="dateRangePicker" placeholder="Select Date Range" class="w-full px-4 py-2 border rounded-lg" value="${dateRangeDisplay}"/></div>
+                        <div><label for="targetAmount" class="block text-sm font-medium text-gray-700 mb-2">Target Amount (MYR)</label><input type="number" id="targetAmount" value="${targetAmount}" class="w-full px-4 py-2 border rounded-lg"/></div>
+                        <div class="flex items-end"><button id="generateClaims" class="w-full px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center justify-center shadow-md"><i data-lucide="refresh-cw" class="w-5 h-5 mr-2"></i>Generate Claims</button></div>
+                    </div>
+                    
+                    <div class="border-t border-gray-200 mt-6 pt-6">
+                        <h3 class="text-lg font-semibold text-gray-700 mb-4 text-center">Actions</h3>
+                        <div class="flex flex-wrap gap-3 justify-center">
+                            <button id="autoTuneBtn" class="flex items-center px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 shadow-md"><i data-lucide="wand-2" class="w-5 h-5 mr-2"></i>Auto-Tune</button>
+                            <button id="addCustomClaim" class="flex items-center px-5 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 shadow-md"><i data-lucide="plus" class="w-5 h-5 mr-2"></i>Add Custom</button>
+                            <button id="deleteAllClaims" class="flex items-center px-5 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 shadow-md"><i data-lucide="trash-2" class="w-5 h-5 mr-2"></i>Delete All</button>
+                            <button id="exportBackupBtn" class="flex items-center px-5 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-800 shadow-md"><i data-lucide="save" class="w-5 h-5 mr-2"></i>Export Backup</button>
+                            <button id="importBackupBtn" class="flex items-center px-5 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 shadow-md"><i data-lucide="folder-open" class="w-5 h-5 mr-2"></i>Import Backup</button>
+                            <button id="exportToPDF" class="flex items-center px-5 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 shadow-md"><i data-lucide="file-text" class="w-5 h-5 mr-2"></i>Export PDF</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Sticky Totals Bar -->
+                <div class="sticky top-0 z-10 bg-blue-100 p-4 rounded-lg mb-6 shadow-lg border border-blue-200">
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="text-xl font-bold text-blue-800">Current Total: MYR ${totalAmount.toFixed(2)}</span>
+                        <span class="text-lg font-semibold text-blue-700">${progress.toFixed(1)}% of Target</span>
+                    </div>
+                    <div class="w-full bg-gray-300 rounded-full h-2.5">
+                        <div class="bg-blue-600 h-2.5 rounded-full" style="width: ${progress}%"></div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-lg overflow-hidden mt-6">
+                    <div class="px-6 py-4 bg-gray-50 border-b border-gray-200 flex items-center justify-between flex-wrap gap-3">
+                        <h2 class="text-2xl font-semibold text-gray-800">Generated Claims (${claims.length} items)</h2>
+                        <div class="flex items-center gap-2">
+                            <label for="distanceMultiplier" class="text-sm font-medium text-gray-700 whitespace-nowrap">Dist. Multiplier:</label>
+                            <div class="flex items-center">
+                                <button id="decreaseMultiplier" class="w-8 h-8 bg-red-100 text-red-700 rounded-l-lg hover:bg-red-200 flex items-center justify-center text-lg font-bold">-</button>
+                                <input type="number" step="0.1" id="distanceMultiplier" value="${distanceMultiplier.toFixed(1)}" class="w-20 h-8 px-2 py-1 text-sm border-t border-b text-center focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                                <button id="increaseMultiplier" class="w-8 h-8 bg-green-100 text-green-700 rounded-r-lg hover:bg-green-200 flex items-center justify-center text-lg font-bold">+</button>
+                            </div>
+                        </div>
+                        <button id="toggleAllDescriptions" class="flex items-center px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"><i data-lucide="${expandCollapseIcon}" class="w-5 h-5 mr-2"></i>${expandCollapseText}</button>
+                    </div>
+
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-50"><tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[12%] sortable-header" data-sort-by="type">Type ${sortColumn === 'type' ? `<i data-lucide="${sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'}" class="w-3 h-3 ml-1 inline-block"></i>` : ''}</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[18%] sortable-header" data-sort-by="locationDisplayName">Site Name ${sortColumn === 'locationDisplayName' ? `<i data-lucide="${sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'}" class="w-3 h-3 ml-1 inline-block"></i>` : ''}</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[15%] sortable-header" data-sort-by="date">Date ${sortColumn === 'date' ? `<i data-lucide="${sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'}" class="w-3 h-3 ml-1 inline-block"></i>` : ''}</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[20%] sortable-header" data-sort-by="distance">Distance ${sortColumn === 'distance' ? `<i data-lucide="${sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'}" class="w-3 h-3 ml-1 inline-block"></i>` : ''}</th>
+                                <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-[10%]">Meal</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[15%] sortable-header" data-sort-by="amount">Amount ${sortColumn === 'amount' ? `<i data-lucide="${sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'}" class="w-3 h-3 ml-1 inline-block"></i>` : ''}</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[10%]">Actions</th>
+                            </tr></thead>
+                            <tbody class="bg-white divide-y divide-gray-200">${claims.length > 0 ? claims.map(claim => {
+                                const iconName = getClaimIconName(claim.type);
+                                const displayAmount = claim.amount + (claim.includesMealAllowance ? claim.mealAllowanceAmount : 0);
+                                const isMealOptionAvailable = claim.type === 'mileage' && claim.distance > 40;
+                                const isExpanded = expandedClaims.has(claim.id);
+                                
+                                let siteNameHtml;
+                                if (claim.type === 'mileage') {
+                                    siteNameHtml = `
+                                        <select data-claim-id="${claim.id}" class="site-select w-full p-1 border rounded-md text-sm bg-white">
+                                            ${uniqueSitesInTable.map(siteName => `<option value="${siteName}" ${claim.locationDisplayName === siteName ? 'selected' : ''}>${siteName}</option>`).join('')}
+                                            <option value="" ${!uniqueSitesInTable.includes(claim.locationDisplayName) ? 'selected' : ''}>- Custom -</option>
+                                        </select>
+                                    `;
+                                } else {
+                                    siteNameHtml = `<span class="text-sm font-medium text-gray-900">${claim.locationDisplayName || '-'}</span>`;
+                                }
+
+                                return `
+                                    <tr class="hover:bg-gray-50">
+                                        <td class="px-4 py-3"><div class="flex items-center"><i data-lucide="${iconName}" class="w-5 h-5 text-gray-500 mr-2"></i><span class="text-sm font-medium text-gray-900 capitalize">${claim.type.replace('_', ' ')}</span></div></td>
+                                        <td class="px-4 py-3">${siteNameHtml}</td>
+                                        <td class="px-4 py-3"><input type="date" value="${claim.date}" data-claim-id="${claim.id}" data-field="date" class="claim-input px-2 py-1 text-sm border rounded-md w-full"/></td>
+                                        <td class="px-4 py-3">
+                                            ${claim.type === 'mileage' ? `
+                                                <div class="flex items-center space-x-1">
+                                                    <button data-location="${claim.location}" data-amount="-1" class="dist-adj-btn w-7 h-7 bg-red-100 text-red-700 rounded hover:bg-red-200">-</button>
+                                                    <input type="number" value="${claim.distance || ''}" data-claim-id="${claim.id}" data-field="distance" class="claim-input w-20 px-2 py-1 text-sm border rounded-md text-center" placeholder="km"/>
+                                                    <button data-location="${claim.location}" data-amount="1" class="dist-adj-btn w-7 h-7 bg-green-100 text-green-700 rounded hover:bg-green-200">+</button>
+                                                    <span class="text-sm text-gray-600">km</span>
+                                                </div>` : `<span class="text-gray-400">-</span>`}
+                                        </td>
+                                        <td class="px-4 py-3 text-center">
+                                            ${isMealOptionAvailable ? `<input type="checkbox" id="meal-${claim.id}" data-claim-id="${claim.id}" data-field="includesMealAllowance" ${claim.includesMealAllowance ? 'checked' : ''} class="meal-cb h-4 w-4 text-green-600 focus:ring-green-500 border-gray-300 rounded cursor-pointer" title="+ MYR ${claim.mealAllowanceAmount.toFixed(2)}"/>` : `<span class="text-gray-400">-</span>`}
+                                        </td>
+                                        <td class="px-4 py-3"><span class="text-sm font-semibold text-green-700">MYR ${displayAmount.toFixed(2)}</span></td>
+                                        <td class="px-4 py-3"><div class="flex items-center space-x-2">
+                                            <button data-claim-id="${claim.id}" class="toggle-desc-btn text-blue-600 hover:text-blue-800"><i data-lucide="${isExpanded ? 'chevron-up' : 'chevron-down'}" class="w-5 h-5"></i></button>
+                                            <button data-claim-id="${claim.id}" class="delete-claim-btn text-red-600 hover:text-red-800"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                                        </div></td>
+                                    </tr>
+                                    <tr id="desc-row-${claim.id}" class="${isExpanded ? '' : 'hidden'}"><td colspan="7" class="p-4 bg-gray-50"><div class="flex items-start gap-2"><textarea data-claim-id="${claim.id}" data-field="description" class="description-textarea flex-grow">${claim.description}</textarea>${claim.type === 'mileage' && claim.location ? `<button data-claim-id="${claim.id}" class="apply-desc-btn flex-shrink-0 p-2 text-blue-600 hover:text-blue-800 hover:bg-blue-100 rounded-md" title="Apply this description to all claims for ${claim.locationDisplayName}"><i data-lucide="copy-plus" class="w-5 h-5"></i></button>` : ''}</div></td></tr>
+                                `;}).join('') : `<tr><td colspan="7"><div class="text-center py-12 text-gray-500"><i data-lucide="inbox" class="w-16 h-16 mx-auto mb-4 text-gray-400"></i><p>No claims generated yet.</p></div></td></tr>`}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>`;
+
+            lucide.createIcons();
+            attachEventListeners();
+            initializeFlatpickr();
+
+            if (showSettings && mapsApiLoaded) {
+                initializeAutocomplete();
+            }
+
+            requestAnimationFrame(() => {
+                window.scrollTo(0, scrollY);
+            });
+        }
+
+        function initializeFlatpickr() {
+            flatpickr("#dateRangePicker", {
+                mode: "range",
+                dateFormat: "Y-m-d",
+                defaultDate: [startDate, endDate],
+                onChange: function(selectedDates) {
+                    if (selectedDates.length === 2) {
+                        startDate = this.formatDate(selectedDates[0], "Y-m-d");
+                        endDate = this.formatDate(selectedDates[1], "Y-m-d");
+                    }
+                    saveToLocalStorage();
+                    renderApp();
+                }
+            });
+        }
+
+        function attachEventListeners() {
+            document.getElementById('toggleSettings').onclick = () => { 
+                showSettings = !showSettings; 
+                renderApp(); 
+            };
+
+            if (showSettings) {
+                document.getElementById('toggleApiKeyLock').onclick = () => {
+                    isApiKeyLocked = !isApiKeyLocked;
+                    saveToLocalStorage();
+                    renderApp();
+                };
+
+                document.getElementById('mileageRate').onchange = (e) => { settings.mileageRate = parseFloat(e.target.value) || 0; saveToLocalStorage(); renderApp(); };
+                document.getElementById('hpAllowance').onchange = (e) => { settings.hpAllowance = parseInt(e.target.value) || 0; saveToLocalStorage(); renderApp(); };
+                document.getElementById('dayTripMeal').onchange = (e) => { settings.dayTripMeal = parseInt(e.target.value) || 0; saveToLocalStorage(); renderApp(); };
+                document.getElementById('outstationMeal').onchange = (e) => { settings.outstationMeal = parseInt(e.target.value) || 0; saveToLocalStorage(); renderApp(); };
+                document.getElementById('tollParking').onchange = (e) => { settings.tollParking = parseFloat(e.target.value) || 0; saveToLocalStorage(); };
+                document.getElementById('dailyMileageCap').onchange = (e) => { settings.dailyMileageCap = e.target.value ? parseInt(e.target.value) : ''; saveToLocalStorage(); };
+                document.querySelectorAll('.claim-type-checkbox').forEach(cb => { cb.onchange = (e) => { if (e.target.checked) enabledClaimTypes.push(e.target.value); else enabledClaimTypes = enabledClaimTypes.filter(id => id !== e.target.value); saveToLocalStorage(); }; });
+                document.getElementById('includeSaturday').onchange = (e) => { includeSaturday = e.target.checked; saveToLocalStorage(); };
+                document.getElementById('includeSunday').onchange = (e) => { includeSunday = e.target.checked; saveToLocalStorage(); };
+                document.getElementById('addLocation').onclick = () => {
+                    const nameInput = document.getElementById('newLocationName');
+                    const displayNameInput = document.getElementById('newLocationDisplayName');
+                    const distInput = document.getElementById('newLocationDistance');
+                    const newName = nameInput.value.trim();
+                    const newDisplayName = displayNameInput.value.trim() || newName;
+
+                    if (newName) {
+                        settings.customLocations.push({ 
+                            name: newName, 
+                            displayName: newDisplayName,
+                            distance: parseFloat(distInput.value) || 0, 
+                            type: document.getElementById('newLocationType').value, 
+                            frequency: document.getElementById('newLocationFrequency').value, 
+                            priority: document.getElementById('newLocationPriority').value 
+                        });
+                        sortCustomLocations();
+                        saveToLocalStorage();
+                        renderApp();
+                        displayNameInput.value = '';
+                        nameInput.value = ''; 
+                        distInput.value = '';
+                    }
+                };
+                
+                document.querySelectorAll('.location-input').forEach(input => {
+                    input.onchange = (e) => {
+                        const index = parseInt(e.target.dataset.locationIndex);
+                        const field = e.target.dataset.field;
+                        let value = (field === 'distance') ? parseFloat(e.target.value) || 0 : e.target.value;
+                        settings.customLocations[index][field] = value;
+                        if (field === 'priority') { sortCustomLocations(); renderApp(); }
+                        saveToLocalStorage();
+                    };
+                });
+                
+                document.querySelectorAll('.delete-location-btn').forEach(btn => { btn.onclick = (e) => { const index = parseInt(e.currentTarget.dataset.locationIndex); showMessageBox('Confirm Delete', `Delete ${settings.customLocations[index].displayName}?`, () => { settings.customLocations.splice(index, 1); saveToLocalStorage(); renderApp(); }); }; });
+                
+                document.getElementById('googleApiKey').onchange = (e) => { settings.googleApiKey = e.target.value; saveToLocalStorage(); loadGoogleMapsAPI(); };
+                document.getElementById('startPoint').onchange = (e) => { settings.startPoint = e.target.value; saveToLocalStorage(); };
+                document.getElementById('calculateNewDistance').onclick = () => calculateDistance(document.getElementById('newLocationName'), document.getElementById('newLocationDistance'));
+                document.querySelectorAll('.calculate-existing-btn').forEach(btn => {
+                    btn.onclick = (e) => {
+                        const index = parseInt(e.currentTarget.dataset.locationIndex);
+                        const nameInput = document.querySelector(`.location-input[data-location-index="${index}"][data-field="name"]`);
+                        const distInput = document.querySelector(`.location-input[data-location-index="${index}"][data-field="distance"]`);
+                        calculateDistance(nameInput, distInput, index);
+                    }
+                });
+            }
+
+            document.getElementById('targetAmount').onchange = (e) => { targetAmount = parseFloat(e.target.value) || 0; saveToLocalStorage(); renderApp(); };
+            document.getElementById('generateClaims').onclick = generateClaims;
+            document.getElementById('addCustomClaim').onclick = addCustomClaim;
+            document.getElementById('deleteAllClaims').onclick = deleteAllClaims;
+            document.getElementById('exportBackupBtn').onclick = exportBackup;
+            document.getElementById('importBackupBtn').onclick = importBackup;
+            document.getElementById('exportToPDF').onclick = exportToPDF;
+            
+            // --- Multiplier Event Listeners (Updated for 0.1 increment) ---
+            document.getElementById('distanceMultiplier').onchange = (e) => {
+                let newValue = parseFloat(e.target.value);
+                if (isNaN(newValue) || newValue < 0.1) {
+                    newValue = 1.0; // Reset to 1.0 if invalid input
+                }
+                distanceMultiplier = newValue;
+                applyDistanceMultiplier(); // This saves and re-renders
+            };
+
+            document.getElementById('increaseMultiplier').onclick = () => {
+                distanceMultiplier = parseFloat((distanceMultiplier + 0.1).toFixed(1));
+                applyDistanceMultiplier();
+            };
+
+            document.getElementById('decreaseMultiplier').onclick = () => {
+                if (distanceMultiplier > 0.1) {
+                    distanceMultiplier = parseFloat((distanceMultiplier - 0.1).toFixed(1));
+                    applyDistanceMultiplier();
+                }
+            };
+
+            const autoTuneBtn = document.getElementById('autoTuneBtn');
+            if(autoTuneBtn) {
+                autoTuneBtn.onclick = () => {
+                    const mileageClaims = claims.filter(c => c.type === 'mileage' && c.location);
+                    if (mileageClaims.length === 0) {
+                        showMessageBox('Auto-Tune Failed', 'No mileage claims found to adjust.');
+                        return;
+                    }
+                    
+                    autoTuneBtn.disabled = true;
+                    autoTuneBtn.innerHTML = `<i data-lucide="loader-2" class="w-5 h-5 mr-2 animate-spin"></i>Tuning...`;
+                    lucide.createIcons();
+
+                    setTimeout(() => {
+                        let guard = 0;
+                        const uniqueLocations = [...new Set(mileageClaims.map(c => c.location))];
+
+                        while (guard < 5000) {
+                            let currentTotal = claims.reduce((sum, claim) => sum + claim.amount + (claim.includesMealAllowance ? claim.mealAllowanceAmount : 0), 0);
+                            if (currentTotal >= targetAmount) break;
+                            
+                            let somethingChangedInLoop = false;
+                            for (const locationName of uniqueLocations) {
+                                const claimForLocation = claims.find(c => c.location === locationName);
+                                if(claimForLocation) {
+                                    const newDistance = (claimForLocation.distance || 0) + 1;
+                                    if (silentUpdateAllClaimsByLocation(locationName, newDistance)) {
+                                        somethingChangedInLoop = true;
+                                    }
+                                }
+                            }
+                            if (!somethingChangedInLoop) break;
+                            guard++;
+                        }
+                        
+                        saveToLocalStorage();
+                        renderApp();
+                    }, 10);
+                };
+            }
+
+            document.querySelectorAll('.claim-input').forEach(input => { input.onchange = (e) => { const id = parseInt(e.target.dataset.claimId); const field = e.target.dataset.field; let value = (e.target.type === 'number') ? parseFloat(e.target.value) || 0 : e.target.value; updateClaim(id, field, value); }; });
+            document.querySelectorAll('.description-textarea').forEach(textarea => { textarea.oninput = (e) => { const id = parseInt(e.target.dataset.claimId); const claim = claims.find(c => c.id === id); if (claim) { claim.description = e.target.value; saveToLocalStorage(); } }; });
+            document.querySelectorAll('.meal-cb').forEach(cb => { cb.onchange = (e) => { const id = parseInt(e.target.dataset.claimId); updateClaim(id, 'includesMealAllowance', e.target.checked); }; });
+            document.querySelectorAll('.delete-claim-btn').forEach(btn => { btn.onclick = (e) => { const id = parseInt(e.currentTarget.dataset.claimId); showMessageBox('Confirm Delete', 'Delete this claim?', () => deleteClaim(id)); }; });
+            document.querySelectorAll('.sortable-header').forEach(header => { header.onclick = (e) => { const column = e.currentTarget.dataset.sortBy; if (sortColumn === column) { sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'; } else { sortColumn = column; sortDirection = 'asc'; } sortClaims(); renderApp(); }; });
+            document.querySelectorAll('.toggle-desc-btn').forEach(btn => { btn.onclick = (e) => { const id = parseInt(e.currentTarget.dataset.claimId); if (expandedClaims.has(id)) expandedClaims.delete(id); else expandedClaims.add(id); saveToLocalStorage(); renderApp(); }; });
+            document.getElementById('toggleAllDescriptions').onclick = () => { if (claims.every(c => expandedClaims.has(c.id))) expandedClaims.clear(); else claims.forEach(c => expandedClaims.add(c.id)); saveToLocalStorage(); renderApp(); };
+            
+            document.querySelectorAll('.dist-adj-btn').forEach(button => {
+                button.onclick = (e) => {
+                    const locationName = e.currentTarget.dataset.location;
+                    const amount = parseInt(e.currentTarget.dataset.amount);
+                    const claim = claims.find(c => c.location === locationName);
+                    if (claim) {
+                        const currentDistance = claim.distance || 0;
+                        updateAllClaimsByLocation(locationName, currentDistance + amount);
+                    }
+                };
+            });
+            
+            document.querySelectorAll('.apply-desc-btn').forEach(button => {
+                button.onclick = (e) => {
+                    const sourceClaimId = parseInt(e.currentTarget.dataset.claimId);
+                    const sourceClaim = claims.find(c => c.id === sourceClaimId);
+                    if (sourceClaim && (sourceClaim.locationDisplayName || sourceClaim.location)) {
+                        const descriptionToApply = sourceClaim.description;
+                        const locationToMatch = sourceClaim.location || sourceClaim.locationDisplayName;
+
+                        claims.forEach(claim => {
+                            if ((claim.location === locationToMatch) || (claim.locationDisplayName === locationToMatch)) {
+                                claim.description = descriptionToApply;
+                            }
+                        });
+                        
+                        saveToLocalStorage();
+                        renderApp();
+                        showMessageBox('Success', `Description applied to all claims for ${sourceClaim.locationDisplayName || sourceClaim.location}.`);
+                    }
+                };
+            });
+            
+            document.querySelectorAll('.site-select').forEach(select => {
+                select.onchange = (e) => {
+                    const claimId = parseInt(e.target.dataset.claimId);
+                    const newSiteDisplayName = e.target.value;
+                    const referenceLocation = settings.customLocations.find(loc => loc.displayName === newSiteDisplayName);
+                    
+                    claims = claims.map(claim => {
+                        if (claim.id === claimId) {
+                            if (referenceLocation) {
+                                // When changing site, link it to the multiplier by setting its base distance
+                                const newBaseDistance = referenceLocation.distance;
+                                const newDistance = Math.round(newBaseDistance * distanceMultiplier);
+                                return {
+                                    ...claim,
+                                    location: referenceLocation.name,
+                                    locationDisplayName: referenceLocation.displayName,
+                                    locationType: referenceLocation.type,
+                                    baseDistance: newBaseDistance,
+                                    distance: newDistance,
+                                    amount: newDistance * settings.mileageRate,
+                                    mealAllowanceAmount: newDistance > 40 ? (newDistance > 200 ? settings.outstationMeal : settings.dayTripMeal) : 0,
+                                    mealAllowanceType: newDistance > 40 ? (newDistance > 200 ? 'meal_outstation' : 'meal_day') : null,
+                                    includesMealAllowance: newDistance > 40
+                                };
+                            } else {
+                                // If "- Custom -" selected, clear location and de-link from multiplier
+                                return { 
+                                    ...claim, 
+                                    location: '', 
+                                    locationDisplayName: '', 
+                                    distance: 0, 
+                                    baseDistance: null,
+                                    amount: 0, 
+                                    mealAllowanceAmount: 0, 
+                                    mealAllowanceType: null, 
+                                    includesMealAllowance: false 
+                                };
+                            }
+                        }
+                        return claim;
+                    });
+
+                    saveToLocalStorage();
+                    renderApp();
+                };
+            });
+        }
+        
+        // --- Google Maps API Functions ---
+        function loadGoogleMapsAPI() {
+            if (settings.googleApiKey && !mapsApiLoaded) {
+                const script = document.getElementById('googleMapsScript');
+                script.src = `https://maps.googleapis.com/maps/api/js?key=${settings.googleApiKey}&libraries=places&callback=initMap`;
+                document.head.appendChild(script);
+            }
+        }
+
+        function initializeAutocomplete() {
+            if (!mapsApiLoaded || !showSettings) return;
+            try {
+                const startPointInput = document.getElementById('startPoint');
+                if (startPointInput) {
+                    new google.maps.places.Autocomplete(startPointInput);
+                }
+
+                const newLocationNameInput = document.getElementById('newLocationName');
+                const newLocationDisplayNameInput = document.getElementById('newLocationDisplayName');
+                if (newLocationNameInput) {
+                    const autocomplete = new google.maps.places.Autocomplete(newLocationNameInput);
+                    autocomplete.addListener('place_changed', () => {
+                        const place = autocomplete.getPlace();
+                        if (place.formatted_address) {
+                            newLocationNameInput.value = place.formatted_address;
+                            newLocationDisplayNameInput.value = place.name && place.name !== place.formatted_address ? place.name : place.formatted_address;
+                        }
+                    });
+                }
+
+                document.querySelectorAll('.location-input[data-field="name"]').forEach(input => {
+                    const autocomplete = new google.maps.places.Autocomplete(input);
+                    autocomplete.addListener('place_changed', () => {
+                        const place = autocomplete.getPlace();
+                        if (place.formatted_address) {
+                            input.value = place.formatted_address;
+                            const index = parseInt(input.dataset.locationIndex);
+                            settings.customLocations[index].name = place.formatted_address;
+                            if (place.name && place.name !== place.formatted_address) {
+                                settings.customLocations[index].displayName = place.name;
+                                const displayNameInput = document.querySelector(`.location-input[data-location-index="${index}"][data-field="displayName"]`);
+                                if (displayNameInput) displayNameInput.value = place.name;
+                            } else {
+                                settings.customLocations[index].displayName = place.formatted_address;
+                                const displayNameInput = document.querySelector(`.location-input[data-location-index="${index}"][data-field="displayName"]`);
+                                if (displayNameInput) displayNameInput.value = place.formatted_address;
+                            }
+                            saveToLocalStorage();
+                        }
+                    });
+                });
+
+            } catch (e) {
+                console.error("Error initializing Google Maps Autocomplete:", e);
+            }
+        }
+
+        window.initMap = function() {
+            console.log("Google Maps API loaded.");
+            mapsApiLoaded = true;
+            initializeAutocomplete();
+        }
+
+        function calculateDistance(destinationInput, distanceInput, locationIndex = null) {
+            if (!mapsApiLoaded) {
+                showMessageBox('API Error', 'Google Maps API is not loaded. Please check your API key and refresh.');
+                return;
+            }
+            if (!settings.startPoint) {
+                showMessageBox('Input Error', 'Please set your Default Start Point in Settings first.');
+                return;
+            }
+
+            const destinationAddress = destinationInput.value;
+            if (!destinationAddress) {
+                showMessageBox('Input Error', 'Please enter a destination address.');
+                return;
+            }
+
+            const service = new google.maps.DistanceMatrixService();
+            service.getDistanceMatrix({
+                origins: [settings.startPoint],
+                destinations: [destinationAddress],
+                travelMode: 'DRIVING',
+                unitSystem: google.maps.UnitSystem.METRIC,
+            }, (response, status) => {
+                if (status === 'OK' && response.rows[0].elements[0].status === 'OK') {
+                    const oneWayDistance = response.rows[0].elements[0].distance.value; // in meters
+                    const roundTripKm = Math.round((oneWayDistance / 1000) * 2);
+                    distanceInput.value = roundTripKm;
+                    
+                    if (locationIndex !== null) {
+                        settings.customLocations[locationIndex].distance = roundTripKm;
+                        saveToLocalStorage();
+                    }
+                } else {
+                    showMessageBox('Calculation Error', 'Could not calculate distance. Check addresses and API key. Error: ' + status);
+                }
+            });
+        }
+
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadFromLocalStorage();
+            loadGoogleMapsAPI();
+            renderApp();
+        });
+    </script>
+</body>
+</html>
