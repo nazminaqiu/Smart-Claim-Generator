@@ -162,7 +162,13 @@
                 const storedSettings = localStorage.getItem('claimsGenerator_settings');
                 if (storedSettings) {
                     const loadedSettings = JSON.parse(storedSettings);
+                    // Overwrite default settings with loaded settings, but keep the preset API key if none is saved
+                    const defaultApiKey = settings.googleApiKey;
                     settings = { ...settings, ...loadedSettings };
+                    if (!loadedSettings.googleApiKey) {
+                        settings.googleApiKey = defaultApiKey;
+                    }
+
                     if (!Array.isArray(settings.customLocations)) settings.customLocations = [];
                     // Ensure each custom location has a displayName, even if loaded from old format
                     settings.customLocations = settings.customLocations.map(loc => ({
