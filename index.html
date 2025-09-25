@@ -82,7 +82,7 @@
             tollParking: 200, // This is now treated as the TOTAL for toll claims
             dailyMileageCap: '', // Default to empty
             customLocations: [], // New: Array to store user-defined locations
-            googleApiKey: 'AIzaSyAJyhj-tFjwXh66pzEA-Eh7wdwubye3txo',
+            googleApiKey: 'AIzaSyAJyhj-tFjwXh66pzEA-Eh7wdwubye3txo', // Default placeholder key
             startPoint: ''
         };
         let showSettings = false;
@@ -94,7 +94,7 @@
         let includeSunday = false;
         let expandedClaims = new Set();
         let mapsApiLoaded = false;
-        let isApiKeyLocked = true; // New state variable for API key lock status
+        let isApiKeyLocked = false; // MODIFIED: API key is unlocked by default
         let distanceMultiplier = 1.0; // New: Distance multiplier for generation, now a float
 
         // --- Site Type Definitions (Revised for IT Technical Specialist) ---
@@ -162,18 +162,12 @@
                 const storedSettings = localStorage.getItem('claimsGenerator_settings');
                 if (storedSettings) {
                     const loadedSettings = JSON.parse(storedSettings);
-                    // Overwrite default settings with loaded settings, but keep the preset API key if none is saved
-                    const defaultApiKey = settings.googleApiKey;
                     settings = { ...settings, ...loadedSettings };
-                    if (!loadedSettings.googleApiKey) {
-                        settings.googleApiKey = defaultApiKey;
-                    }
-
+                    
                     if (!Array.isArray(settings.customLocations)) settings.customLocations = [];
                     // Ensure each custom location has a displayName, even if loaded from old format
                     settings.customLocations = settings.customLocations.map(loc => ({
                         ...loc,
-                        // If displayName doesn't exist, use the 'name' (full address) as fallback
                         displayName: loc.displayName || loc.name, 
                         type: siteTypes.some(st => st.id === loc.type) ? loc.type : 'other_technical',
                         frequency: loc.frequency || 'multiple',
@@ -216,6 +210,7 @@
                 if (storedExpandedClaims) expandedClaims = new Set(JSON.parse(storedExpandedClaims));
 
                 const storedApiKeyLocked = localStorage.getItem('claimsGenerator_isApiKeyLocked');
+                 // MODIFIED: If not set in storage, it remains false (unlocked) from the default state
                 if (storedApiKeyLocked !== null) isApiKeyLocked = storedApiKeyLocked === 'true';
 
                 const storedDistanceMultiplier = localStorage.getItem('claimsGenerator_distanceMultiplier');
@@ -298,14 +293,12 @@
 
         function sortCustomLocations() {
             const priorityOrder = { 'high': 1, 'normal': 2, 'low': 3, 'exclude': 4 };
-            // Changed comparison to sort High priority (1) to the top (ascending order)
             settings.customLocations.sort((a, b) => (priorityOrder[a.priority] || 99) - (priorityOrder[b.priority] || 99));
         }
 
         // --- Core Application Logic ---
         function applyDistanceMultiplier() {
             claims = claims.map(claim => {
-                // Only apply to mileage claims that have a valid baseDistance (i.e., not manually edited)
                 if (claim.type === 'mileage' && typeof claim.baseDistance === 'number') {
                     const newDistance = Math.round(claim.baseDistance * distanceMultiplier);
                     
@@ -318,7 +311,6 @@
                         claim.mealAllowanceAmount = isOutstation ? settings.outstationMeal : settings.dayTripMeal;
                         claim.mealAllowanceType = isOutstation ? 'meal_outstation' : 'meal_day';
                     } else {
-                        // If it no longer qualifies, ensure meal allowance is off
                         claim.includesMealAllowance = false; 
                         claim.mealAllowanceAmount = 0;
                         claim.mealAllowanceType = null;
@@ -331,7 +323,7 @@
             renderApp();
         }
 
-        // --- NEW: Smart Claim Generation Algorithm ---
+        // --- Smart Claim Generation Algorithm ---
         function generateClaims() {
             if (!startDate || !endDate) {
                 showMessageBox('Error', 'Please select a valid date range.');
@@ -355,12 +347,10 @@
                 currentTotal += settings.hpAllowance;
             }
             if (enabledClaimTypes.includes('toll') && settings.tollParking > 0) {
-                // For simplicity in the new algorithm, we add toll as a single entry. It can be split manually if needed.
                 finalClaims.push({ id: claimIdCounter++, type: 'toll', description: 'Toll & Parking', date: startDate, amount: settings.tollParking, distance: null, location: null, includesMealAllowance: false, mealAllowanceAmount: 0, mealAllowanceType: null });
                 currentTotal += settings.tollParking;
             }
 
-            // Helper to create a mileage claim object
             const createMileageClaim = (location, claimDate) => {
                 const baseDist = location.distance;
                 let actualDistance = Math.round(baseDist * distanceMultiplier);
@@ -371,7 +361,7 @@
                 let mealAmount = 0, mealType = null, includesMeal = false;
                 
                 if (actualDistance > 40) {
-                    includesMeal = true; // Always include meal if > 40km for max value
+                    includesMeal = true;
                     mealAmount = isOutstation ? settings.outstationMeal : settings.dayTripMeal;
                     mealType = isOutstation ? 'meal_outstation' : 'meal_day';
                 }
@@ -397,7 +387,6 @@
                 };
             };
 
-            // 2. Get all available days
             const allDays = [];
             const diffDays = Math.ceil(Math.abs(end - start) / (1000 * 60 * 60 * 24)) + 1;
             for (let d = 0; d < diffDays; d++) {
@@ -410,7 +399,6 @@
             }
             let availableDays = new Set(allDays);
 
-            // 3. Handle 'Single Entry' locations
             const singleEntryLocations = activeLocations.filter(loc => loc.frequency === 'single');
             singleEntryLocations.forEach(location => {
                 if (availableDays.size > 0) {
@@ -422,7 +410,6 @@
                 }
             });
 
-            // 4. Create a pool of all possible 'Multiple Entry' claims
             const multipleEntryLocations = activeLocations.filter(loc => loc.frequency !== 'single');
             const potentialClaimsPool = [];
             for (const date of availableDays) {
@@ -431,7 +418,6 @@
                 }
             }
 
-            // 5. Greedy Fill: Sort pool by highest total amount and pick the best for each day
             potentialClaimsPool.sort((a, b) => b.totalAmount - a.totalAmount);
             let solutionClaims = [];
             let usedDays = new Set();
@@ -443,9 +429,8 @@
                 }
             }
             
-            // 6. Optimization Phase: Try to swap for better claims to fill the gap
             let optimizationGuard = 0;
-            while(optimizationGuard < 10) { // Loop a few times to catch cascading improvements
+            while(optimizationGuard < 10) {
                 let madeSwap = false;
                 let bestSwap = null;
                 let bestImprovement = 0;
@@ -453,7 +438,6 @@
                 for (let i = 0; i < solutionClaims.length; i++) {
                     const claimInSolution = solutionClaims[i];
                     
-                    // Find better options for the same day from the entire pool
                     const optionsForDay = potentialClaimsPool.filter(p => p.date === claimInSolution.date);
                     for (const option of optionsForDay) {
                         const improvement = option.totalAmount - claimInSolution.totalAmount;
@@ -474,12 +458,11 @@
                 }
 
                 if (!madeSwap) {
-                    break; // No more improvements found
+                    break;
                 }
                 optimizationGuard++;
             }
 
-            // 7. Finalize and add IDs
             solutionClaims.forEach(claim => {
                 finalClaims.push({ ...claim, id: claimIdCounter++ });
             });
@@ -500,7 +483,7 @@
                 date: startDate || new Date().toISOString().split('T')[0], 
                 amount: 0, 
                 distance: 0, 
-                baseDistance: null, // Custom claims are not affected by multiplier by default
+                baseDistance: null,
                 location: '', 
                 locationDisplayName: '', 
                 locationType: 'other_technical', 
@@ -520,7 +503,6 @@
                     if (updated.type === 'mileage') {
                         if (field === 'distance') {
                             updated.amount = value * settings.mileageRate;
-                            // When distance is manually edited, de-link it from the global multiplier
                             updated.baseDistance = null; 
                             const isOutstation = value > 200;
                             const qualifiesForMeal = value > 40;
@@ -564,7 +546,6 @@
             claims.forEach(claim => {
                 if (claim.location === locationName) {
                     claim.distance = newDistance;
-                    // De-link from multiplier when batch-adjusting
                     claim.baseDistance = null; 
                     claim.amount = newDistance * settings.mileageRate;
                     const isOutstation = newDistance > 200;
@@ -593,7 +574,7 @@
             claims.forEach(claim => {
                 if (claim.location === locationName && claim.distance < newDistance) {
                     claim.distance = newDistance;
-                    claim.baseDistance = null; // De-link from multiplier
+                    claim.baseDistance = null;
                     claim.amount = newDistance * settings.mileageRate;
                     const isOutstation = newDistance > 200;
                     const qualifiesForMeal = newDistance > 40;
@@ -645,8 +626,8 @@
                 includeSaturday,
                 includeSunday,
                 expandedClaims: Array.from(expandedClaims),
-                isApiKeyLocked, // Include lock status in backup
-                distanceMultiplier // Include multiplier in backup
+                isApiKeyLocked,
+                distanceMultiplier
             };
             const jsonString = JSON.stringify(backupData, null, 2);
             const blob = new Blob([jsonString], { type: 'application/json' });
@@ -672,7 +653,6 @@
                 reader.onload = event => {
                     try {
                         const backupData = JSON.parse(event.target.result);
-                        // Basic validation
                         if (backupData && backupData.claims && backupData.settings) {
                             claims = backupData.claims || [];
                             settings = backupData.settings || settings;
@@ -685,10 +665,9 @@
                             includeSaturday = backupData.includeSaturday || false;
                             includeSunday = backupData.includeSunday || false;
                             expandedClaims = new Set(backupData.expandedClaims || []);
-                            isApiKeyLocked = backupData.isApiKeyLocked !== undefined ? backupData.isApiKeyLocked : true; // Restore lock status
-                            distanceMultiplier = parseFloat(backupData.distanceMultiplier) || 1.0; // Restore multiplier
+                            isApiKeyLocked = backupData.isApiKeyLocked !== undefined ? backupData.isApiKeyLocked : true;
+                            distanceMultiplier = parseFloat(backupData.distanceMultiplier) || 1.0;
 
-                            // Ensure imported custom locations also have displayName
                             settings.customLocations = settings.customLocations.map(loc => ({
                                 ...loc,
                                 displayName: loc.displayName || loc.name
@@ -749,14 +728,12 @@
                 theme: 'striped',
                 headStyles: { fillColor: [22, 160, 133] },
                 didDrawPage: function (data) {
-                    // Footer
                     let str = "Page " + doc.internal.getNumberOfPages();
                     doc.setFontSize(10);
                     doc.text(str, data.settings.margin.left, doc.internal.pageSize.height - 10);
                 }
             });
             
-            // Add a total row
             const finalY = doc.lastAutoTable.finalY;
             doc.setFontSize(12);
             doc.setFont('helvetica', 'bold');
@@ -803,7 +780,7 @@
                                 <div class="flex items-end space-x-2">
                                     <div class="flex-grow">
                                         <label for="googleApiKey" class="block text-sm font-medium text-blue-700 mb-2">Google Maps API Key</label>
-                                        <input type="password" id="googleApiKey" value="${settings.googleApiKey}" class="w-full px-4 py-2 border border-blue-300 rounded-lg ${isApiKeyLocked ? 'bg-gray-100' : 'bg-white'}" placeholder="Enter your API key" ${isApiKeyLocked ? 'readonly' : ''}/>
+                                        <input type="text" id="googleApiKey" value="${settings.googleApiKey}" class="w-full px-4 py-2 border border-blue-300 rounded-lg ${isApiKeyLocked ? 'bg-gray-100' : 'bg-white'}" placeholder="Enter your API key" ${isApiKeyLocked ? 'readonly' : ''}/>
                                         <p class="text-xs text-gray-500 mt-1">Needed for auto distance calculation. Get one from Google Cloud Platform.</p>
                                     </div>
                                     <button id="toggleApiKeyLock" class="px-3 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 text-sm flex-shrink-0">
@@ -882,7 +859,6 @@
                     </div>
                 </div>
                 
-                <!-- Sticky Totals Bar -->
                 <div class="sticky top-0 z-10 bg-blue-100 p-4 rounded-lg mb-6 shadow-lg border border-blue-200">
                     <div class="flex justify-between items-center mb-2">
                         <span class="text-xl font-bold text-blue-800">Current Total: MYR ${totalAmount.toFixed(2)}</span>
@@ -1055,7 +1031,7 @@
                 
                 document.querySelectorAll('.delete-location-btn').forEach(btn => { btn.onclick = (e) => { const index = parseInt(e.currentTarget.dataset.locationIndex); showMessageBox('Confirm Delete', `Delete ${settings.customLocations[index].displayName}?`, () => { settings.customLocations.splice(index, 1); saveToLocalStorage(); renderApp(); }); }; });
                 
-                document.getElementById('googleApiKey').onchange = (e) => { settings.googleApiKey = e.target.value; saveToLocalStorage(); loadGoogleMapsAPI(); };
+                document.getElementById('googleApiKey').onchange = (e) => { settings.googleApiKey = e.target.value.trim(); saveToLocalStorage(); loadGoogleMapsAPI(); };
                 document.getElementById('startPoint').onchange = (e) => { settings.startPoint = e.target.value; saveToLocalStorage(); };
                 document.getElementById('calculateNewDistance').onclick = () => calculateDistance(document.getElementById('newLocationName'), document.getElementById('newLocationDistance'));
                 document.querySelectorAll('.calculate-existing-btn').forEach(btn => {
@@ -1076,14 +1052,13 @@
             document.getElementById('importBackupBtn').onclick = importBackup;
             document.getElementById('exportToPDF').onclick = exportToPDF;
             
-            // --- Multiplier Event Listeners (Updated for 0.1 increment) ---
             document.getElementById('distanceMultiplier').onchange = (e) => {
                 let newValue = parseFloat(e.target.value);
                 if (isNaN(newValue) || newValue < 0.1) {
-                    newValue = 1.0; // Reset to 1.0 if invalid input
+                    newValue = 1.0;
                 }
                 distanceMultiplier = newValue;
-                applyDistanceMultiplier(); // This saves and re-renders
+                applyDistanceMultiplier();
             };
 
             document.getElementById('increaseMultiplier').onclick = () => {
@@ -1189,7 +1164,6 @@
                     claims = claims.map(claim => {
                         if (claim.id === claimId) {
                             if (referenceLocation) {
-                                // When changing site, link it to the multiplier by setting its base distance
                                 const newBaseDistance = referenceLocation.distance;
                                 const newDistance = Math.round(newBaseDistance * distanceMultiplier);
                                 return {
@@ -1205,7 +1179,6 @@
                                     includesMealAllowance: newDistance > 40
                                 };
                             } else {
-                                // If "- Custom -" selected, clear location and de-link from multiplier
                                 return { 
                                     ...claim, 
                                     location: '', 
@@ -1230,10 +1203,19 @@
         
         // --- Google Maps API Functions ---
         function loadGoogleMapsAPI() {
-            if (settings.googleApiKey && !mapsApiLoaded) {
-                const script = document.getElementById('googleMapsScript');
+            // Remove any existing script to force a reload if the key changes
+            const existingScript = document.getElementById('googleMapsScript');
+            if (existingScript) existingScript.remove();
+
+            if (settings.googleApiKey) {
+                const script = document.createElement('script');
+                script.id = 'googleMapsScript';
                 script.src = `https://maps.googleapis.com/maps/api/js?key=${settings.googleApiKey}&libraries=places&callback=initMap`;
+                script.onerror = () => {
+                     showMessageBox('API Error', 'Failed to load Google Maps. Please check your API key and internet connection.');
+                };
                 document.head.appendChild(script);
+                mapsApiLoaded = false; // Reset status until callback confirms it's loaded
             }
         }
 
@@ -1241,9 +1223,7 @@
             if (!mapsApiLoaded || !showSettings) return;
             try {
                 const startPointInput = document.getElementById('startPoint');
-                if (startPointInput) {
-                    new google.maps.places.Autocomplete(startPointInput);
-                }
+                if (startPointInput) new google.maps.places.Autocomplete(startPointInput);
 
                 const newLocationNameInput = document.getElementById('newLocationName');
                 const newLocationDisplayNameInput = document.getElementById('newLocationDisplayName');
@@ -1253,7 +1233,9 @@
                         const place = autocomplete.getPlace();
                         if (place.formatted_address) {
                             newLocationNameInput.value = place.formatted_address;
-                            newLocationDisplayNameInput.value = place.name && place.name !== place.formatted_address ? place.name : place.formatted_address;
+                            if (place.name && place.name !== place.formatted_address) {
+                                newLocationDisplayNameInput.value = place.name;
+                            }
                         }
                     });
                 }
@@ -1270,10 +1252,6 @@
                                 settings.customLocations[index].displayName = place.name;
                                 const displayNameInput = document.querySelector(`.location-input[data-location-index="${index}"][data-field="displayName"]`);
                                 if (displayNameInput) displayNameInput.value = place.name;
-                            } else {
-                                settings.customLocations[index].displayName = place.formatted_address;
-                                const displayNameInput = document.querySelector(`.location-input[data-location-index="${index}"][data-field="displayName"]`);
-                                if (displayNameInput) displayNameInput.value = place.formatted_address;
                             }
                             saveToLocalStorage();
                         }
@@ -1282,14 +1260,23 @@
 
             } catch (e) {
                 console.error("Error initializing Google Maps Autocomplete:", e);
+                 showMessageBox('Autocomplete Error', 'Could not initialize address autocomplete. Please ensure your API key has the "Places API" enabled.');
             }
         }
 
         window.initMap = function() {
             console.log("Google Maps API loaded.");
             mapsApiLoaded = true;
-            initializeAutocomplete();
+            if(showSettings) {
+                initializeAutocomplete();
+            }
         }
+        
+        // This function is called by the Google API script on auth failure.
+        window.gm_authFailure = function() {
+            showMessageBox('Authentication Error', 'The provided Google Maps API Key is invalid or has expired. Please check your key in the settings.');
+        };
+
 
         function calculateDistance(destinationInput, distanceInput, locationIndex = null) {
             if (!mapsApiLoaded) {
@@ -1315,7 +1302,7 @@
                 unitSystem: google.maps.UnitSystem.METRIC,
             }, (response, status) => {
                 if (status === 'OK' && response.rows[0].elements[0].status === 'OK') {
-                    const oneWayDistance = response.rows[0].elements[0].distance.value; // in meters
+                    const oneWayDistance = response.rows[0].elements[0].distance.value;
                     const roundTripKm = Math.round((oneWayDistance / 1000) * 2);
                     distanceInput.value = roundTripKm;
                     
@@ -1324,7 +1311,7 @@
                         saveToLocalStorage();
                     }
                 } else {
-                    showMessageBox('Calculation Error', 'Could not calculate distance. Check addresses and API key. Error: ' + status);
+                     showMessageBox('Calculation Error', `Could not calculate distance. Please ensure your API key has the "Distance Matrix API" enabled. Error: ${status}`);
                 }
             });
         }
