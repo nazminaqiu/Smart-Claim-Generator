@@ -164,14 +164,14 @@
                     const loadedSettings = JSON.parse(storedSettings);
                     settings = { ...settings, ...loadedSettings };
                     if (!Array.isArray(settings.customLocations)) settings.customLocations = [];
-                    // Ensure each custom location has a displayName, even if loaded from old format
+                    // Ensure each custom location has required properties, even if loaded from old format
                     settings.customLocations = settings.customLocations.map(loc => ({
                         ...loc,
-                        // If displayName doesn't exist, use the 'name' (full address) as fallback
                         displayName: loc.displayName || loc.name, 
                         type: siteTypes.some(st => st.id === loc.type) ? loc.type : 'other_technical',
                         frequency: loc.frequency || 'multiple',
-                        priority: loc.priority || 'normal'
+                        priority: loc.priority || 'normal',
+                        isLocked: loc.isLocked || false // NEW: Add isLocked property, default to false
                     }));
                 }
 
@@ -215,7 +215,8 @@
                 const storedDistanceMultiplier = localStorage.getItem('claimsGenerator_distanceMultiplier');
                 if (storedDistanceMultiplier !== null) distanceMultiplier = parseFloat(storedDistanceMultiplier);
 
-            } catch (error) {
+            } catch (error)
+                {
                 console.error('Error loading from local storage:', error);
                 showMessageBox('Load Error', 'Could not load saved data. Starting with defaults.');
             }
@@ -299,8 +300,11 @@
         // --- Core Application Logic ---
         function applyDistanceMultiplier() {
             claims = claims.map(claim => {
-                // Only apply to mileage claims that have a valid baseDistance (i.e., not manually edited)
-                if (claim.type === 'mileage' && typeof claim.baseDistance === 'number') {
+                // Find the corresponding custom location for the claim
+                const locationProfile = settings.customLocations.find(loc => loc.name === claim.location);
+
+                // Only apply to mileage claims that have a valid baseDistance and are NOT locked
+                if (claim.type === 'mileage' && typeof claim.baseDistance === 'number' && (!locationProfile || !locationProfile.isLocked)) {
                     const newDistance = Math.round(claim.baseDistance * distanceMultiplier);
                     
                     claim.distance = newDistance;
@@ -387,7 +391,8 @@
             
             const processLocation = (location, claimDate) => {
                 const baseDist = location.distance;
-                let actualDistance = Math.round(baseDist * distanceMultiplier);
+                // Apply multiplier during generation ONLY if the site is not locked
+                let actualDistance = location.isLocked ? baseDist : Math.round(baseDist * distanceMultiplier);
 
                 if (settings.dailyMileageCap && actualDistance > settings.dailyMileageCap) actualDistance = settings.dailyMileageCap;
                 const isOutstation = actualDistance > 200;
@@ -546,6 +551,12 @@
             if (newDistance > cap) {
                 newDistance = cap;
             }
+            
+            // Auto-tune should not affect locked sites
+            const locationProfile = settings.customLocations.find(loc => loc.name === locationName);
+            if(locationProfile && locationProfile.isLocked) {
+                return false;
+            }
 
             claims.forEach(claim => {
                 if (claim.location === locationName && claim.distance < newDistance) {
@@ -645,10 +656,11 @@
                             isApiKeyLocked = backupData.isApiKeyLocked !== undefined ? backupData.isApiKeyLocked : true; // Restore lock status
                             distanceMultiplier = parseFloat(backupData.distanceMultiplier) || 1.0; // Restore multiplier
 
-                            // Ensure imported custom locations also have displayName
+                            // Ensure imported custom locations also have displayName and isLocked
                             settings.customLocations = settings.customLocations.map(loc => ({
                                 ...loc,
-                                displayName: loc.displayName || loc.name
+                                displayName: loc.displayName || loc.name,
+                                isLocked: loc.isLocked || false
                             }));
 
                             saveToLocalStorage();
@@ -806,6 +818,7 @@
                                 </div>
                                 <ul class="space-y-2">${settings.customLocations.length > 0 ? settings.customLocations.map((loc, index) => `
                                     <li class="flex items-center justify-between bg-white p-3 rounded-lg shadow-sm flex-wrap gap-2">
+                                        <button data-location-index="${index}" class="lock-location-btn text-gray-400 hover:text-yellow-600" title="Lock/Unlock site from distance multiplier">${loc.isLocked ? '<i data-lucide="lock" class="w-4 h-4 text-yellow-500"></i>' : '<i data-lucide="unlock" class="w-4 h-4"></i>'}</button>
                                         <input type="text" value="${loc.displayName}" data-location-index="${index}" data-field="displayName" class="location-input flex-grow lg:w-1/5 px-2 py-1 border rounded text-sm"/>
                                         <input type="text" value="${loc.name}" data-location-index="${index}" data-field="name" class="location-input flex-grow lg:w-2/5 px-2 py-1 border rounded text-sm" placeholder="Full Address"/>
                                         <input type="number" value="${loc.distance || ''}" data-location-index="${index}" data-field="distance" class="location-input w-20 px-2 py-1 border rounded text-sm" placeholder="0"/>
@@ -814,7 +827,7 @@
                                         <select data-location-index="${index}" data-field="type" class="location-input px-2 py-1 border rounded text-sm flex-shrink-0">${siteTypes.map(type => `<option value="${type.id}" ${loc.type === type.id ? 'selected' : ''}>${type.name}</option>`).join('')}</select>
                                         <select data-location-index="${index}" data-field="frequency" class="location-input px-2 py-1 border rounded text-sm flex-shrink-0"><option value="multiple" ${loc.frequency === 'multiple' ? 'selected' : ''}>Multiple</option><option value="single" ${loc.frequency === 'single' ? 'selected' : ''}>Single</option></select>
                                         <select data-location-index="${index}" data-field="priority" class="location-input px-2 py-1 border rounded text-sm flex-shrink-0"><option value="high" ${loc.priority === 'high' ? 'selected' : ''}>High</option><option value="normal" ${loc.priority === 'normal' ? 'selected' : ''}>Normal</option><option value="low" ${loc.priority === 'low' ? 'selected' : ''}>Low</option><option value="exclude" ${loc.priority === 'exclude' ? 'selected' : ''}>Exclude</option></select>
-                                        <button data-location-index="${index}" class="delete-location-btn text-red-600 hover:text-red-800 ml-3 flex-shrink-0"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                                        <button data-location-index="${index}" class="delete-location-btn text-red-600 hover:text-red-800 ml-2 flex-shrink-0"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
                                     </li>`).join('') : '<li class="text-gray-500 text-sm">No custom locations added.</li>'}
                                 </ul>
                             </div>
@@ -988,7 +1001,8 @@
                             distance: parseFloat(distInput.value) || 0, 
                             type: document.getElementById('newLocationType').value, 
                             frequency: document.getElementById('newLocationFrequency').value, 
-                            priority: document.getElementById('newLocationPriority').value 
+                            priority: document.getElementById('newLocationPriority').value,
+                            isLocked: false // New locations are unlocked by default
                         });
                         sortCustomLocations();
                         saveToLocalStorage();
@@ -1007,6 +1021,15 @@
                         settings.customLocations[index][field] = value;
                         if (field === 'priority') { sortCustomLocations(); renderApp(); }
                         saveToLocalStorage();
+                    };
+                });
+
+                document.querySelectorAll('.lock-location-btn').forEach(btn => {
+                    btn.onclick = (e) => {
+                        const index = parseInt(e.currentTarget.dataset.locationIndex);
+                        settings.customLocations[index].isLocked = !settings.customLocations[index].isLocked;
+                        saveToLocalStorage();
+                        renderApp();
                     };
                 });
                 
@@ -1146,9 +1169,9 @@
                     claims = claims.map(claim => {
                         if (claim.id === claimId) {
                             if (referenceLocation) {
-                                // When changing site, link it to the multiplier by setting its base distance
                                 const newBaseDistance = referenceLocation.distance;
-                                const newDistance = Math.round(newBaseDistance * distanceMultiplier);
+                                // Apply multiplier when changing sites unless the new site is locked
+                                const newDistance = referenceLocation.isLocked ? newBaseDistance : Math.round(newBaseDistance * distanceMultiplier);
                                 return {
                                     ...claim,
                                     location: referenceLocation.name,
