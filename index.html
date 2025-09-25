@@ -164,14 +164,14 @@
                     const loadedSettings = JSON.parse(storedSettings);
                     settings = { ...settings, ...loadedSettings };
                     if (!Array.isArray(settings.customLocations)) settings.customLocations = [];
-                    // Ensure each custom location has required properties, even if loaded from old format
+                    // Ensure each custom location has a displayName, even if loaded from old format
                     settings.customLocations = settings.customLocations.map(loc => ({
                         ...loc,
+                        // If displayName doesn't exist, use the 'name' (full address) as fallback
                         displayName: loc.displayName || loc.name, 
                         type: siteTypes.some(st => st.id === loc.type) ? loc.type : 'other_technical',
                         frequency: loc.frequency || 'multiple',
-                        priority: loc.priority || 'normal',
-                        isLocked: loc.isLocked || false // NEW: Add isLocked property, default to false
+                        priority: loc.priority || 'normal'
                     }));
                 }
 
@@ -215,8 +215,7 @@
                 const storedDistanceMultiplier = localStorage.getItem('claimsGenerator_distanceMultiplier');
                 if (storedDistanceMultiplier !== null) distanceMultiplier = parseFloat(storedDistanceMultiplier);
 
-            } catch (error)
-                {
+            } catch (error) {
                 console.error('Error loading from local storage:', error);
                 showMessageBox('Load Error', 'Could not load saved data. Starting with defaults.');
             }
@@ -300,11 +299,8 @@
         // --- Core Application Logic ---
         function applyDistanceMultiplier() {
             claims = claims.map(claim => {
-                // Find the corresponding custom location for the claim
-                const locationProfile = settings.customLocations.find(loc => loc.name === claim.location);
-
-                // Only apply to mileage claims that have a valid baseDistance and are NOT locked
-                if (claim.type === 'mileage' && typeof claim.baseDistance === 'number' && (!locationProfile || !locationProfile.isLocked)) {
+                // Only apply to mileage claims that have a valid baseDistance (i.e., not manually edited)
+                if (claim.type === 'mileage' && typeof claim.baseDistance === 'number') {
                     const newDistance = Math.round(claim.baseDistance * distanceMultiplier);
                     
                     claim.distance = newDistance;
@@ -329,124 +325,160 @@
             renderApp();
         }
 
+        // --- NEW: Smart Claim Generation Algorithm ---
         function generateClaims() {
             if (!startDate || !endDate) {
                 showMessageBox('Error', 'Please select a valid date range.');
                 return;
             }
-
             const start = new Date(startDate);
             const end = new Date(endDate);
-            let newClaims = [];
+
+            let finalClaims = [];
             let currentTotal = 0;
             claimIdCounter = 1;
 
-            const activeLocations = settings.customLocations.filter(loc => loc.priority !== 'exclude');
+            const activeLocations = settings.customLocations.filter(loc => loc.priority !== 'exclude' && loc.distance > 0);
             if (activeLocations.length === 0 && enabledClaimTypes.includes('mileage')) {
-                 showMessageBox('Warning', 'No custom sites defined. Add some in settings to generate mileage claims.');
+                showMessageBox('Warning', 'No custom sites defined. Add some in settings to generate mileage claims.');
             }
-            
-            const diffDays = Math.ceil(Math.abs(end - start) / (1000 * 60 * 60 * 24)) + 1;
 
-            const getAvailableDays = () => {
-                const allDays = [];
-                for (let d = 0; d < diffDays; d++) {
-                    const currentDate = new Date(start);
-                    currentDate.setDate(start.getDate() + d);
-                    const dayOfWeek = currentDate.getDay();
-                    if (!((dayOfWeek === 0 && !includeSunday) || (dayOfWeek === 6 && !includeSaturday))) {
-                        allDays.push(currentDate.toISOString().split('T')[0]);
-                    }
-                }
-                const usedDays = new Set(newClaims.filter(c => c.type === 'mileage').map(c => c.date));
-                return allDays.filter(d => !usedDays.has(d));
-            };
-
-            const createWeightedPool = (locations) => {
-                const pool = [];
-                locations.forEach(loc => {
-                    const weight = { high: 5, normal: 3, low: 1 }[loc.priority] || 3;
-                    for (let i = 0; i < weight; i++) pool.push(loc);
-                });
-                return pool;
-            };
-
+            // 1. Add Fixed Claims
             if (enabledClaimTypes.includes('hp')) {
-                newClaims.push({ id: claimIdCounter++, type: 'hp', description: 'HP ALLOWANCE', date: startDate, amount: settings.hpAllowance, distance: null, location: null, includesMealAllowance: false, mealAllowanceAmount: 0, mealAllowanceType: null });
+                finalClaims.push({ id: claimIdCounter++, type: 'hp', description: 'HP ALLOWANCE', date: startDate, amount: settings.hpAllowance, distance: null, location: null, includesMealAllowance: false, mealAllowanceAmount: 0, mealAllowanceType: null });
                 currentTotal += settings.hpAllowance;
             }
-
             if (enabledClaimTypes.includes('toll') && settings.tollParking > 0) {
-                let remainingToll = settings.tollParking;
-                let numTollEntries = Math.floor(Math.random() * 4) + 2;
-                for (let i = 0; i < numTollEntries && remainingToll > 0; i++) {
-                    let amount = (i === numTollEntries - 1) ? remainingToll : Math.max(5, Math.round((Math.random() * remainingToll * 0.6) / 5) * 5);
-                    amount = Math.min(amount, remainingToll);
-                    const randomDate = new Date(start.getTime() + Math.random() * (end.getTime() - start.getTime()));
-                    newClaims.push({ id: claimIdCounter++, type: 'toll', description: `Toll & Parking (Part ${i + 1})`, date: randomDate.toISOString().split('T')[0], amount, distance: null, location: null, includesMealAllowance: false, mealAllowanceAmount: 0, mealAllowanceType: null });
-                    currentTotal += amount;
-                    remainingToll -= amount;
-                }
+                // For simplicity in the new algorithm, we add toll as a single entry. It can be split manually if needed.
+                finalClaims.push({ id: claimIdCounter++, type: 'toll', description: 'Toll & Parking', date: startDate, amount: settings.tollParking, distance: null, location: null, includesMealAllowance: false, mealAllowanceAmount: 0, mealAllowanceType: null });
+                currentTotal += settings.tollParking;
             }
-            
-            const processLocation = (location, claimDate) => {
-                const baseDist = location.distance;
-                // Apply multiplier during generation ONLY if the site is not locked
-                let actualDistance = location.isLocked ? baseDist : Math.round(baseDist * distanceMultiplier);
 
+            // Helper to create a mileage claim object
+            const createMileageClaim = (location, claimDate) => {
+                const baseDist = location.distance;
+                let actualDistance = Math.round(baseDist * distanceMultiplier);
                 if (settings.dailyMileageCap && actualDistance > settings.dailyMileageCap) actualDistance = settings.dailyMileageCap;
+                
                 const isOutstation = actualDistance > 200;
                 let mileageAmount = actualDistance * settings.mileageRate;
-                let mealAmount = 0, mealType = null;
+                let mealAmount = 0, mealType = null, includesMeal = false;
+                
                 if (actualDistance > 40) {
+                    includesMeal = true; // Always include meal if > 40km for max value
                     mealAmount = isOutstation ? settings.outstationMeal : settings.dayTripMeal;
                     mealType = isOutstation ? 'meal_outstation' : 'meal_day';
                 }
+
                 const activities = activityDescriptions[location.type] || activityDescriptions.default;
                 const locationDisplayName = location.displayName || location.name;
                 const description = `${activities[Math.floor(Math.random() * activities.length)]} ${locationDisplayName}`;
                 
-                newClaims.push({ 
-                    id: claimIdCounter++, 
+                return { 
                     type: 'mileage', 
                     description, 
                     date: claimDate, 
                     amount: mileageAmount, 
-                    baseDistance: baseDist, // Store the original, unmultiplied distance
-                    distance: actualDistance, // Store the calculated, multiplied distance
+                    totalAmount: mileageAmount + mealAmount,
+                    baseDistance: baseDist,
+                    distance: actualDistance,
                     location: location.name,
-                    locationDisplayName: locationDisplayName,
+                    locationDisplayName,
                     locationType: location.type, 
-                    includesMealAllowance: false, 
+                    includesMealAllowance: includesMeal, 
                     mealAllowanceAmount: mealAmount, 
-                    mealAllowanceType: mealType, 
-                    isFiller: false 
-                });
-                currentTotal += mileageAmount;
+                    mealAllowanceType: mealType,
+                };
             };
 
-            if (enabledClaimTypes.includes('mileage')) {
-                const singleEntryLocations = activeLocations.filter(loc => loc.frequency === 'single' && loc.distance > 0);
-                singleEntryLocations.forEach(location => {
-                    const availableDays = getAvailableDays();
-                    if (availableDays.length > 0) {
-                        const claimDate = availableDays[Math.floor(Math.random() * availableDays.length)];
-                        processLocation(location, claimDate);
-                    }
-                });
+            // 2. Get all available days
+            const allDays = [];
+            const diffDays = Math.ceil(Math.abs(end - start) / (1000 * 60 * 60 * 24)) + 1;
+            for (let d = 0; d < diffDays; d++) {
+                const currentDate = new Date(start);
+                currentDate.setDate(start.getDate() + d);
+                const dayOfWeek = currentDate.getDay();
+                if (!((dayOfWeek === 0 && !includeSunday) || (dayOfWeek === 6 && !includeSaturday))) {
+                    allDays.push(currentDate.toISOString().split('T')[0]);
+                }
+            }
+            let availableDays = new Set(allDays);
 
-                const multipleEntryLocations = activeLocations.filter(loc => loc.frequency !== 'single' && loc.distance > 0);
-                const multipleEntryPool = createWeightedPool(multipleEntryLocations);
-                if (multipleEntryPool.length > 0) {
-                    let availableDays = getAvailableDays();
-                    availableDays.forEach(claimDate => {
-                        const location = multipleEntryPool[Math.floor(Math.random() * multipleEntryPool.length)];
-                        processLocation(location, claimDate);
-                    });
+            // 3. Handle 'Single Entry' locations
+            const singleEntryLocations = activeLocations.filter(loc => loc.frequency === 'single');
+            singleEntryLocations.forEach(location => {
+                if (availableDays.size > 0) {
+                    const claimDate = Array.from(availableDays)[Math.floor(Math.random() * availableDays.size)];
+                    const claim = createMileageClaim(location, claimDate);
+                    finalClaims.push({ ...claim, id: claimIdCounter++ });
+                    currentTotal += claim.totalAmount;
+                    availableDays.delete(claimDate);
+                }
+            });
+
+            // 4. Create a pool of all possible 'Multiple Entry' claims
+            const multipleEntryLocations = activeLocations.filter(loc => loc.frequency !== 'single');
+            const potentialClaimsPool = [];
+            for (const date of availableDays) {
+                for (const location of multipleEntryLocations) {
+                    potentialClaimsPool.push(createMileageClaim(location, date));
+                }
+            }
+
+            // 5. Greedy Fill: Sort pool by highest total amount and pick the best for each day
+            potentialClaimsPool.sort((a, b) => b.totalAmount - a.totalAmount);
+            let solutionClaims = [];
+            let usedDays = new Set();
+            for (const pClaim of potentialClaimsPool) {
+                if (!usedDays.has(pClaim.date) && (currentTotal + pClaim.totalAmount <= targetAmount)) {
+                    solutionClaims.push(pClaim);
+                    currentTotal += pClaim.totalAmount;
+                    usedDays.add(pClaim.date);
                 }
             }
             
-            claims = newClaims;
+            // 6. Optimization Phase: Try to swap for better claims to fill the gap
+            let optimizationGuard = 0;
+            while(optimizationGuard < 10) { // Loop a few times to catch cascading improvements
+                let madeSwap = false;
+                let bestSwap = null;
+                let bestImprovement = 0;
+
+                for (let i = 0; i < solutionClaims.length; i++) {
+                    const claimInSolution = solutionClaims[i];
+                    
+                    // Find better options for the same day from the entire pool
+                    const optionsForDay = potentialClaimsPool.filter(p => p.date === claimInSolution.date);
+                    for (const option of optionsForDay) {
+                        const improvement = option.totalAmount - claimInSolution.totalAmount;
+                        if (improvement > bestImprovement && (currentTotal + improvement <= targetAmount)) {
+                            bestImprovement = improvement;
+                            bestSwap = { indexToReplace: i, claimToAdd: option };
+                        }
+                    }
+                }
+
+                if (bestSwap) {
+                    const oldClaim = solutionClaims[bestSwap.indexToReplace];
+                    currentTotal -= oldClaim.totalAmount;
+                    
+                    solutionClaims[bestSwap.indexToReplace] = bestSwap.claimToAdd;
+                    currentTotal += bestSwap.claimToAdd.totalAmount;
+                    madeSwap = true;
+                }
+
+                if (!madeSwap) {
+                    break; // No more improvements found
+                }
+                optimizationGuard++;
+            }
+
+            // 7. Finalize and add IDs
+            solutionClaims.forEach(claim => {
+                finalClaims.push({ ...claim, id: claimIdCounter++ });
+            });
+
+            claims = finalClaims;
             sortColumn = 'date';
             sortDirection = 'asc';
             sortClaims();
@@ -551,12 +583,6 @@
             if (newDistance > cap) {
                 newDistance = cap;
             }
-            
-            // Auto-tune should not affect locked sites
-            const locationProfile = settings.customLocations.find(loc => loc.name === locationName);
-            if(locationProfile && locationProfile.isLocked) {
-                return false;
-            }
 
             claims.forEach(claim => {
                 if (claim.location === locationName && claim.distance < newDistance) {
@@ -656,11 +682,10 @@
                             isApiKeyLocked = backupData.isApiKeyLocked !== undefined ? backupData.isApiKeyLocked : true; // Restore lock status
                             distanceMultiplier = parseFloat(backupData.distanceMultiplier) || 1.0; // Restore multiplier
 
-                            // Ensure imported custom locations also have displayName and isLocked
+                            // Ensure imported custom locations also have displayName
                             settings.customLocations = settings.customLocations.map(loc => ({
                                 ...loc,
-                                displayName: loc.displayName || loc.name,
-                                isLocked: loc.isLocked || false
+                                displayName: loc.displayName || loc.name
                             }));
 
                             saveToLocalStorage();
@@ -818,7 +843,6 @@
                                 </div>
                                 <ul class="space-y-2">${settings.customLocations.length > 0 ? settings.customLocations.map((loc, index) => `
                                     <li class="flex items-center justify-between bg-white p-3 rounded-lg shadow-sm flex-wrap gap-2">
-                                        <button data-location-index="${index}" class="lock-location-btn text-gray-400 hover:text-yellow-600" title="Lock/Unlock site from distance multiplier">${loc.isLocked ? '<i data-lucide="lock" class="w-4 h-4 text-yellow-500"></i>' : '<i data-lucide="unlock" class="w-4 h-4"></i>'}</button>
                                         <input type="text" value="${loc.displayName}" data-location-index="${index}" data-field="displayName" class="location-input flex-grow lg:w-1/5 px-2 py-1 border rounded text-sm"/>
                                         <input type="text" value="${loc.name}" data-location-index="${index}" data-field="name" class="location-input flex-grow lg:w-2/5 px-2 py-1 border rounded text-sm" placeholder="Full Address"/>
                                         <input type="number" value="${loc.distance || ''}" data-location-index="${index}" data-field="distance" class="location-input w-20 px-2 py-1 border rounded text-sm" placeholder="0"/>
@@ -827,7 +851,7 @@
                                         <select data-location-index="${index}" data-field="type" class="location-input px-2 py-1 border rounded text-sm flex-shrink-0">${siteTypes.map(type => `<option value="${type.id}" ${loc.type === type.id ? 'selected' : ''}>${type.name}</option>`).join('')}</select>
                                         <select data-location-index="${index}" data-field="frequency" class="location-input px-2 py-1 border rounded text-sm flex-shrink-0"><option value="multiple" ${loc.frequency === 'multiple' ? 'selected' : ''}>Multiple</option><option value="single" ${loc.frequency === 'single' ? 'selected' : ''}>Single</option></select>
                                         <select data-location-index="${index}" data-field="priority" class="location-input px-2 py-1 border rounded text-sm flex-shrink-0"><option value="high" ${loc.priority === 'high' ? 'selected' : ''}>High</option><option value="normal" ${loc.priority === 'normal' ? 'selected' : ''}>Normal</option><option value="low" ${loc.priority === 'low' ? 'selected' : ''}>Low</option><option value="exclude" ${loc.priority === 'exclude' ? 'selected' : ''}>Exclude</option></select>
-                                        <button data-location-index="${index}" class="delete-location-btn text-red-600 hover:text-red-800 ml-2 flex-shrink-0"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                                        <button data-location-index="${index}" class="delete-location-btn text-red-600 hover:text-red-800 ml-3 flex-shrink-0"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
                                     </li>`).join('') : '<li class="text-gray-500 text-sm">No custom locations added.</li>'}
                                 </ul>
                             </div>
@@ -836,13 +860,13 @@
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
                         <div><label for="dateRangePicker" class="block text-sm font-medium text-gray-700 mb-2">Target Date Range</label><input type="text" id="dateRangePicker" placeholder="Select Date Range" class="w-full px-4 py-2 border rounded-lg" value="${dateRangeDisplay}"/></div>
                         <div><label for="targetAmount" class="block text-sm font-medium text-gray-700 mb-2">Target Amount (MYR)</label><input type="number" id="targetAmount" value="${targetAmount}" class="w-full px-4 py-2 border rounded-lg"/></div>
-                        <div class="flex items-end"><button id="generateClaims" class="w-full px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center justify-center shadow-md"><i data-lucide="refresh-cw" class="w-5 h-5 mr-2"></i>Generate Claims</button></div>
+                        <div class="flex items-end"><button id="generateClaims" class="w-full px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center justify-center shadow-md"><i data-lucide="wand-2" class="w-5 h-5 mr-2"></i>Smart Generate</button></div>
                     </div>
                     
                     <div class="border-t border-gray-200 mt-6 pt-6">
                         <h3 class="text-lg font-semibold text-gray-700 mb-4 text-center">Actions</h3>
                         <div class="flex flex-wrap gap-3 justify-center">
-                            <button id="autoTuneBtn" class="flex items-center px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 shadow-md"><i data-lucide="wand-2" class="w-5 h-5 mr-2"></i>Auto-Tune</button>
+                            <button id="autoTuneBtn" class="flex items-center px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 shadow-md"><i data-lucide="refresh-cw" class="w-5 h-5 mr-2"></i>Auto-Tune</button>
                             <button id="addCustomClaim" class="flex items-center px-5 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 shadow-md"><i data-lucide="plus" class="w-5 h-5 mr-2"></i>Add Custom</button>
                             <button id="deleteAllClaims" class="flex items-center px-5 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 shadow-md"><i data-lucide="trash-2" class="w-5 h-5 mr-2"></i>Delete All</button>
                             <button id="exportBackupBtn" class="flex items-center px-5 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-800 shadow-md"><i data-lucide="save" class="w-5 h-5 mr-2"></i>Export Backup</button>
@@ -1001,8 +1025,7 @@
                             distance: parseFloat(distInput.value) || 0, 
                             type: document.getElementById('newLocationType').value, 
                             frequency: document.getElementById('newLocationFrequency').value, 
-                            priority: document.getElementById('newLocationPriority').value,
-                            isLocked: false // New locations are unlocked by default
+                            priority: document.getElementById('newLocationPriority').value 
                         });
                         sortCustomLocations();
                         saveToLocalStorage();
@@ -1021,15 +1044,6 @@
                         settings.customLocations[index][field] = value;
                         if (field === 'priority') { sortCustomLocations(); renderApp(); }
                         saveToLocalStorage();
-                    };
-                });
-
-                document.querySelectorAll('.lock-location-btn').forEach(btn => {
-                    btn.onclick = (e) => {
-                        const index = parseInt(e.currentTarget.dataset.locationIndex);
-                        settings.customLocations[index].isLocked = !settings.customLocations[index].isLocked;
-                        saveToLocalStorage();
-                        renderApp();
                     };
                 });
                 
@@ -1169,9 +1183,9 @@
                     claims = claims.map(claim => {
                         if (claim.id === claimId) {
                             if (referenceLocation) {
+                                // When changing site, link it to the multiplier by setting its base distance
                                 const newBaseDistance = referenceLocation.distance;
-                                // Apply multiplier when changing sites unless the new site is locked
-                                const newDistance = referenceLocation.isLocked ? newBaseDistance : Math.round(newBaseDistance * distanceMultiplier);
+                                const newDistance = Math.round(newBaseDistance * distanceMultiplier);
                                 return {
                                     ...claim,
                                     location: referenceLocation.name,
